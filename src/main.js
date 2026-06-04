@@ -26,5 +26,27 @@ renderer.setSize(window.innerWidth, window.innerHeight)
 renderer.setPixelRatio(window.devicePixelRatio)
 document.body.appendChild(renderer.domElement)
 
-// --- Render once to confirm everything works ---
+// --- Lighting ---
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.6)
+scene.add(ambientLight)
+
+const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8)
+directionalLight.position.set(5, 10, 7)
+scene.add(directionalLight)
+
+// --- Floor ---
+const floorGeometry = new THREE.PlaneGeometry(20, 20)
+const floorMaterial = new THREE.MeshStandardMaterial({ color: 0xcccccc })
+const floor = new THREE.Mesh(floorGeometry, floorMaterial)
+floor.rotation.x = -Math.PI / 2
+scene.add(floor)
+
+// --- Trolley ---
+const trolleyGeometry = new THREE.BoxGeometry(1, 1, 1)
+const trolleyMaterial = new THREE.MeshStandardMaterial({ color: 0xff3333 })
+const trolley = new THREE.Mesh(trolleyGeometry, trolleyMaterial)
+trolley.position.set(0, 0.5, 0)
+scene.add(trolley)
+
+// --- Render ---
 renderer.render(scene, camera)
