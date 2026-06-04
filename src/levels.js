@@ -58,9 +58,13 @@ export class LevelManager {
     this.gridZPositions = [-1]
     for (let a = 0; a < shelfConfig.numAisles; a++) {
       const baseZ = a * shelfConfig.aisleSpacingZ
-      this.gridZPositions.push(parseFloat((baseZ + shelfConfig.shelfDepth / 2 + shelfConfig.aisleGap / 2).toFixed(1)))
+      this.gridZPositions.push(parseFloat(baseZ.toFixed(1)))
+      if (a < shelfConfig.numAisles - 1) {
+        const walkwayZ = baseZ + shelfConfig.shelfDepth / 2 + shelfConfig.aisleGap / 2
+        this.gridZPositions.push(parseFloat(walkwayZ.toFixed(1)))
+      }
     }
-    const lastZ = shelfConfig.numAisles * shelfConfig.aisleSpacingZ + shelfConfig.shelfDepth * 2 + shelfConfig.aisleGap
+    const lastZ = (shelfConfig.numAisles - 1) * shelfConfig.aisleSpacingZ + shelfConfig.shelfDepth / 2 + shelfConfig.aisleGap
     this.gridZPositions.push(parseFloat(lastZ.toFixed(1)))
 
     this.trolley = createTrolley()
@@ -340,9 +344,13 @@ export class LevelManager {
     this.gridZPositions = [-1]
     for (let a = 0; a < shelfConfig.numAisles; a++) {
       const baseZ = a * shelfConfig.aisleSpacingZ
-      this.gridZPositions.push(parseFloat((baseZ + shelfConfig.shelfDepth / 2 + shelfConfig.aisleGap / 2).toFixed(1)))
+      this.gridZPositions.push(parseFloat(baseZ.toFixed(1)))
+      if (a < shelfConfig.numAisles - 1) {
+        const walkwayZ = baseZ + shelfConfig.shelfDepth / 2 + shelfConfig.aisleGap / 2
+        this.gridZPositions.push(parseFloat(walkwayZ.toFixed(1)))
+      }
     }
-    const lastZ = shelfConfig.numAisles * shelfConfig.aisleSpacingZ + shelfConfig.shelfDepth * 2 + shelfConfig.aisleGap
+    const lastZ = (shelfConfig.numAisles - 1) * shelfConfig.aisleSpacingZ + shelfConfig.shelfDepth / 2 + shelfConfig.aisleGap
     this.gridZPositions.push(parseFloat(lastZ.toFixed(1)))
 
     log.info(MOD, `References rebuilt — ${this.shelfGroups.length} shelf groups, ${this.gridZPositions.length} grid Z positions`)
