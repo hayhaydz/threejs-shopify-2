@@ -48,5 +48,24 @@ const trolley = new THREE.Mesh(trolleyGeometry, trolleyMaterial)
 trolley.position.set(0, 0.5, 0)
 scene.add(trolley)
 
+// --- Input (Raycasting) ---
+const raycaster = new THREE.Raycaster()
+const mouse = new THREE.Vector2()
+const targetPosition = new THREE.Vector3(0, 0.5, 0)
+
+window.addEventListener('pointerdown', (event) => {
+  mouse.x = (event.clientX / window.innerWidth) * 2 - 1
+  mouse.y = -(event.clientY / window.innerHeight) * 2 + 1
+
+  raycaster.setFromCamera(mouse, camera)
+  const intersects = raycaster.intersectObject(floor)
+
+  if (intersects.length > 0) {
+    targetPosition.copy(intersects[0].point)
+    targetPosition.y = 0.5
+    console.log('Target:', targetPosition.x.toFixed(2), targetPosition.z.toFixed(2))
+  }
+})
+
 // --- Render ---
 renderer.render(scene, camera)
