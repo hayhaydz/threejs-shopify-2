@@ -63,9 +63,29 @@ window.addEventListener('pointerdown', (event) => {
   if (intersects.length > 0) {
     targetPosition.copy(intersects[0].point)
     targetPosition.y = 0.5
-    console.log('Target:', targetPosition.x.toFixed(2), targetPosition.z.toFixed(2))
   }
 })
 
-// --- Render ---
-renderer.render(scene, camera)
+// --- Resize ---
+window.addEventListener('resize', () => {
+  const aspect = window.innerWidth / window.innerHeight
+  camera.left = frustumSize * aspect / -2
+  camera.right = frustumSize * aspect / 2
+  camera.top = frustumSize / 2
+  camera.bottom = frustumSize / -2
+  camera.updateProjectionMatrix()
+  renderer.setSize(window.innerWidth, window.innerHeight)
+})
+
+// --- Animation Loop ---
+function animate() {
+  requestAnimationFrame(animate)
+
+  if (trolley.position.distanceTo(targetPosition) > 0.1) {
+    trolley.position.lerp(targetPosition, 0.1)
+  }
+
+  renderer.render(scene, camera)
+}
+
+animate()
