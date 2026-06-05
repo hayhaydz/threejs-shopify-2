@@ -21,16 +21,16 @@ export const shelfConfig = {
 }
 
 const PRODUCT_TYPES = [
-  { name: 'cereal',  color: 0xe74c3c, shape: 'box' },
-  { name: 'soup',    color: 0xf39c12, shape: 'cyl' },
-  { name: 'pasta',   color: 0x2ecc71, shape: 'box' },
-  { name: 'sauce',   color: 0x3498db, shape: 'cyl' },
-  { name: 'rice',    color: 0x9b59b6, shape: 'box' },
-  { name: 'beans',   color: 0xe67e22, shape: 'cyl' },
-  { name: 'flour',   color: 0xf1c40f, shape: 'box' },
-  { name: 'olives',  color: 0x1abc9c, shape: 'cyl' },
-  { name: 'coffee',  color: 0x795548, shape: 'box' },
-  { name: 'tuna',    color: 0x009688, shape: 'cyl' }
+  { name: 'cereal',  color: 0xe74c3c, shape: 'box', title: 'Corn Flakes',  price: '$4.99' },
+  { name: 'soup',    color: 0xf39c12, shape: 'cyl', title: 'Tomato Soup',  price: '$2.49' },
+  { name: 'pasta',   color: 0x2ecc71, shape: 'box', title: 'Penne Pasta',  price: '$1.99' },
+  { name: 'sauce',   color: 0x3498db, shape: 'cyl', title: 'Pasta Sauce',  price: '$3.49' },
+  { name: 'rice',    color: 0x9b59b6, shape: 'box', title: 'Basmati Rice', price: '$5.99' },
+  { name: 'beans',   color: 0xe67e22, shape: 'cyl', title: 'Baked Beans',  price: '$1.49' },
+  { name: 'flour',   color: 0xf1c40f, shape: 'box', title: 'Plain Flour',  price: '$2.29' },
+  { name: 'olives',  color: 0x1abc9c, shape: 'cyl', title: 'Green Olives', price: '$3.99' },
+  { name: 'coffee',  color: 0x795548, shape: 'box', title: 'Roast Coffee', price: '$6.99' },
+  { name: 'tuna',    color: 0x009688, shape: 'cyl', title: 'Tuna Chunks',  price: '$2.79' }
 ]
 
 export const sharedBoxGeo = new THREE.BoxGeometry(0.14, 0.17, 0.11)
@@ -112,10 +112,10 @@ function populateShelf(shelfGroup) {
         const y = boardTopY + halfH * scaleMultiplier
 
         if (isCylinder) {
-          slotData[idx] = { type: 'cyl', boxIdx: cylCount, x, y, z, scaleMultiplier, color: productType.color, productType: productType.name }
+          slotData[idx] = { type: 'cyl', boxIdx: cylCount, x, y, z, scaleMultiplier, color: productType.color, productType: productType.name, title: productType.title, price: productType.price }
           cylCount++
         } else {
-          slotData[idx] = { type: 'box', boxIdx: boxCount, x, y, z, scaleMultiplier, color: productType.color, productType: productType.name }
+          slotData[idx] = { type: 'box', boxIdx: boxCount, x, y, z, scaleMultiplier, color: productType.color, productType: productType.name, title: productType.title, price: productType.price }
           boxCount++
         }
         idx++
@@ -163,6 +163,8 @@ function populateShelf(shelfGroup) {
         scale: s.scaleMultiplier,
         color: s.color,
         productType: s.productType,
+        title: s.title,
+        price: s.price,
         isHidden: false
       })
       bIdx++
@@ -205,6 +207,8 @@ function populateShelf(shelfGroup) {
         scale: s.scaleMultiplier,
         color: s.color,
         productType: s.productType,
+        title: s.title,
+        price: s.price,
         isHidden: false
       })
       cIdx++

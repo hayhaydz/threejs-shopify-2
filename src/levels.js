@@ -13,7 +13,7 @@ import {
   findFrontProductByPosition
 } from './shelf.js'
 import { createTrolley } from './trolley.js'
-import { showCloseButton, hideCloseButton } from './ui.js'
+import { createTextPanel, updateTextPanel } from './canvas-texture.js'
 import { log } from './log.js'
 import { resetDOFSettings } from './debug.js'
 
@@ -126,6 +126,18 @@ export class LevelManager {
     this.trolleyTarget = new THREE.Vector3(0, 0, this.gridZPositions[1])
     this.trolley.position.copy(this.trolleyTarget)
     scene.add(this.trolley)
+
+    this.cart = []
+    this.isDropping = false
+
+    this.inspectionGroup = new THREE.Group()
+    this.inspectionGroup.name = 'inspectionGroup'
+    this.inspectionGroup.visible = false
+    scene.add(this.inspectionGroup)
+
+    this.checkoutTill = this._createCheckoutTill()
+    scene.add(this.checkoutTill)
+    this._nearCheckout = false
 
     this._setupInput()
     log.info(MOD, `Initialized — ${this.shelfGroups.length} shelf groups`)
@@ -293,7 +305,15 @@ export class LevelManager {
   }
 
   _hoverL3(raycaster) {
-
+    if (!this.inspectionGroup.visible) return
+    const buttons = this.inspectionGroup.children.filter(
+      c => c.name === 'btn-add' || c.name === 'btn-cancel'
+    )
+    buttons.forEach(btn => btn.scale.set(1, 1, 1))
+    const hits = raycaster.intersectObjects(buttons, false)
+    if (hits.length > 0) {
+      hits[0].object.scale.set(1.1, 1.1, 1.1)
+    }
   }
 
   _setupInput() {
@@ -377,14 +397,19 @@ export class LevelManager {
           log.info(MOD, `L1→L2: clicked shelf unit ${shelfUnitIndex} (pair ${pairIndex}) at z=${this.activeAisleZ.toFixed(1)}`)
           this.transitionTo(Level.SIDE_ON)
         } else {
-          const floorHits = raycaster.intersectObjects(this.scene.children.filter(c => c.name === 'floor'), false)
-          if (floorHits.length > 0) {
-            const point = floorHits[0].point
-            const snapped = this._snapToGrid(point.x, point.z)
-            this.trolleyTarget.set(snapped.x, 0, snapped.z)
-            log.info(MOD, `Trolley target set to grid (${snapped.x.toFixed(1)}, ${snapped.z.toFixed(1)})`)
+          const tillHits = raycaster.intersectObjects(this.checkoutTill.children, true)
+          if (tillHits.length > 0 && this.trolley.position.distanceTo(this.checkoutTill.position) < 3) {
+            log.info(MOD, `CHECKOUT: ${this.cart.length} items`, this.cart.map(i => `${i.title} ${i.price}`))
           } else {
-            log.debug(MOD, 'L1 click — no shelf or floor hit')
+            const floorHits = raycaster.intersectObjects(this.scene.children.filter(c => c.name === 'floor'), false)
+            if (floorHits.length > 0) {
+              const point = floorHits[0].point
+              const snapped = this._snapToGrid(point.x, point.z)
+              this.trolleyTarget.set(snapped.x, 0, snapped.z)
+              log.info(MOD, `Trolley target set to grid (${snapped.x.toFixed(1)}, ${snapped.z.toFixed(1)})`)
+            } else {
+              log.debug(MOD, 'L1 click — no shelf or floor hit')
+            }
           }
         }
       } else if (this.currentLevel === Level.SIDE_ON) {
@@ -418,20 +443,28 @@ export class LevelManager {
           log.debug(MOD, `L2 click — no product hit (${hits.length} total hits)`)
         }
       } else if (this.currentLevel === Level.INSPECT) {
-        if (!this.selectedProduct) return
-        const hits = raycaster.intersectObjects([this.selectedProduct], false)
-        if (hits.length === 0) {
-          log.info(MOD, 'L3 click-outside — returning to L2')
-          this._returnToL2()
-        } else {
-          log.debug(MOD, 'L3 click on product — starting drag')
-          this.isDraggingProduct = true
+        if (!this.selectedProduct || this.isDropping) return
+        const targets = [this.selectedProduct, ...this.inspectionGroup.children]
+        const hits = raycaster.intersectObjects(targets, false)
+        if (hits.length > 0) {
+          const clicked = hits[0].object
+          if (clicked.name === 'btn-add') {
+            log.info(MOD, 'L3 btn-add clicked — triggering drop')
+            this._triggerDrop()
+          } else if (clicked.name === 'btn-cancel') {
+            log.info(MOD, 'L3 btn-cancel clicked — returning to shelf')
+            this._returnToL2()
+          } else {
+            log.debug(MOD, 'L3 click on product — starting drag')
+            this.isDraggingProduct = true
+          }
         }
       }
     }
 
     this.input.onEscape = () => {
       if (this.currentLevel === Level.INSPECT) {
+        if (this.isDropping) return
         log.info(MOD, 'Escape — L3→L2')
         this._returnToL2()
       } else if (this.currentLevel === Level.SIDE_ON) {
@@ -451,13 +484,13 @@ export class LevelManager {
 
     this._clearHover()
     resetDOFSettings(this.dof)
+    this._clearInspectionGroup()
 
     if (level === Level.OVERVIEW) {
       this.targetPos.copy(LEVEL1_POS)
       this.targetLookAt.copy(LEVEL1_LOOKAT)
       this.targetFOV = LEVEL1_FOV
       this.panOffsetX = 0
-      hideCloseButton()
     } else if (level === Level.SIDE_ON) {
       this.panOffsetX = 0
       this._updateL2Targets()
@@ -507,7 +540,9 @@ export class LevelManager {
     log.info(MOD, `[_selectProduct START] scale=${scale.toFixed(2)} start=(${product.position.x.toFixed(2)},${product.position.y.toFixed(2)},${product.position.z.toFixed(2)}) intermediate=(${this.l3IntermediatePos.x.toFixed(2)},${this.l3IntermediatePos.y.toFixed(2)},${this.l3IntermediatePos.z.toFixed(2)}) target=(${this.inspectTargetPos.x.toFixed(2)},${this.inspectTargetPos.y.toFixed(2)},${this.inspectTargetPos.z.toFixed(2)}) focusDist=${focusDist.toFixed(2)} FOV=${this.targetFOV.toFixed(1)} lerpSpeed=${LERP_SPEED}`)
 
     this.dof.enable(focusDist)
-    showCloseButton(() => this._returnToL2())
+    if (this._instanceRef?.entry) {
+      this._createInspectionUI(this._instanceRef.entry)
+    }
   }
 
   _returnToL2() {
@@ -515,6 +550,7 @@ export class LevelManager {
     this.isTransitioning = true
     this.currentLevel = Level.SIDE_ON
     this.l3Returning = true
+    this._clearInspectionGroup()
 
     if (this._instanceRef) {
       const shelfGroup = this._instanceRef.shelfGroup
@@ -540,7 +576,6 @@ export class LevelManager {
     log.info(MOD, `[_returnToL2 START] product=(${this.selectedProduct.position.x.toFixed(2)},${this.selectedProduct.position.y.toFixed(2)},${this.selectedProduct.position.z.toFixed(2)}) intermediate=(${this.l3IntermediatePos.x.toFixed(2)},${this.l3IntermediatePos.y.toFixed(2)},${this.l3IntermediatePos.z.toFixed(2)}) target=(${this.selectedProduct.userData.originalPosition.x.toFixed(2)},${this.selectedProduct.userData.originalPosition.y.toFixed(2)},${this.selectedProduct.userData.originalPosition.z.toFixed(2)})`)
 
     this.dof.disable()
-    hideCloseButton()
     this.isDraggingProduct = false
   }
 
@@ -569,6 +604,30 @@ export class LevelManager {
 
   update() {
     this.trolley.position.lerp(this.trolleyTarget, 0.04)
+
+    if (this.isDropping && this.selectedProduct) {
+      this.selectedProduct.position.y -= 0.3
+      this.inspectionGroup.children.forEach(child => {
+        if (child.material) {
+          child.material.transparent = true
+          child.material.opacity = Math.max(0, child.material.opacity - 0.05)
+        }
+      })
+      if (this.selectedProduct.position.y < -10) {
+        this._completeDrop()
+      }
+    }
+
+    if (this.checkoutTill && this.checkoutSign) {
+      const dist = this.trolley.position.distanceTo(this.checkoutTill.position)
+      if (dist < 3 && !this._nearCheckout) {
+        this._nearCheckout = true
+        updateTextPanel(this.checkoutSign, `Checkout: ${this.cart.length} Items`)
+      } else if (dist >= 3 && this._nearCheckout) {
+        this._nearCheckout = false
+        updateTextPanel(this.checkoutSign, 'Checkout Area')
+      }
+    }
 
     if (this.currentLevel === Level.SIDE_ON && !this.isTransitioning) {
       this._updateL2Targets()
@@ -628,6 +687,7 @@ export class LevelManager {
           } else {
             this.selectedProduct.position.copy(this.inspectTargetPos)
             this.l3AnimPhase = ANIM_PHASE.NONE
+            this.inspectionGroup.visible = true
             const elapsed = performance.now() - this.l3AnimStartTime
             log.info(MOD, `[L3 anim COMPLETE] frames=${this.l3AnimFrameCount} t=${elapsed.toFixed(0)}ms final=(${this.inspectTargetPos.x.toFixed(2)},${this.inspectTargetPos.y.toFixed(2)},${this.inspectTargetPos.z.toFixed(2)})`)
           }
@@ -756,8 +816,163 @@ export class LevelManager {
     return {
       level: this.currentLevel,
       isTransitioning: this.isTransitioning,
+      isDropping: this.isDropping,
+      cartSize: this.cart.length,
       selectedProduct: this.selectedProduct?.userData?.id ?? this._instanceRef?.entry?.id ?? '—',
       camera: this.camera
     }
+  }
+
+  _createInspectionUI(entry) {
+    this._clearInspectionGroup()
+
+    const group = this.inspectionGroup
+    group.position.copy(this.inspectTargetPos)
+
+    const toCamera = new THREE.Vector3()
+      .subVectors(this.camera.position, this.inspectTargetPos)
+      .normalize()
+    group.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), toCamera)
+
+    const title = entry?.title || entry?.productType || 'Product'
+    const price = entry?.price || '$0.00'
+
+    const infoPanel = createTextPanel(`${title}\n${price}`, {
+      bgColor: 'rgba(0, 0, 0, 0.85)',
+      textColor: '#ffffff',
+      fontSize: 36,
+      width: 512,
+      height: 256,
+      meshWidth: 0.5,
+      meshHeight: 0.3,
+      borderRadius: 12
+    })
+    infoPanel.position.set(-0.45, 0.15, 0)
+    infoPanel.name = 'info-panel'
+    group.add(infoPanel)
+
+    const addBtn = createTextPanel('Drop in Trolley', {
+      bgColor: '#27ae60',
+      textColor: '#ffffff',
+      fontSize: 42,
+      width: 512,
+      height: 96,
+      meshWidth: 0.45,
+      meshHeight: 0.12,
+      borderRadius: 12
+    })
+    addBtn.position.set(0, -0.35, 0.05)
+    addBtn.name = 'btn-add'
+    group.add(addBtn)
+
+    const cancelBtn = createTextPanel('Back to Shelf', {
+      bgColor: '#c0392b',
+      textColor: '#ffffff',
+      fontSize: 36,
+      width: 384,
+      height: 80,
+      meshWidth: 0.35,
+      meshHeight: 0.1,
+      borderRadius: 12
+    })
+    cancelBtn.position.set(0.35, 0.25, 0.05)
+    cancelBtn.name = 'btn-cancel'
+    group.add(cancelBtn)
+
+    group.visible = false
+  }
+
+  _clearInspectionGroup() {
+    this.inspectionGroup.children.forEach(child => {
+      if (child.material) {
+        if (child.material.map) child.material.map.dispose()
+        child.material.dispose()
+      }
+      if (child.geometry) child.geometry.dispose()
+    })
+    while (this.inspectionGroup.children.length > 0) {
+      this.inspectionGroup.remove(this.inspectionGroup.children[0])
+    }
+    this.inspectionGroup.visible = false
+  }
+
+  _createCheckoutTill() {
+    const group = new THREE.Group()
+    group.name = 'checkoutTill'
+
+    const counterGeo = new THREE.BoxGeometry(4, 1, 1.5)
+    const counterMat = new THREE.MeshStandardMaterial({ color: 0x5D4E37 })
+    const counter = new THREE.Mesh(counterGeo, counterMat)
+    counter.position.y = 0.5
+    group.add(counter)
+
+    const frontGeo = new THREE.BoxGeometry(4, 0.8, 0.1)
+    const frontMat = new THREE.MeshStandardMaterial({ color: 0x4A3F2F })
+    const front = new THREE.Mesh(frontGeo, frontMat)
+    front.position.set(0, 0.4, 0.75)
+    group.add(front)
+
+    const poleGeo = new THREE.CylinderGeometry(0.03, 0.03, 3, 8)
+    const poleMat = new THREE.MeshStandardMaterial({ color: 0x333333 })
+    const pole = new THREE.Mesh(poleGeo, poleMat)
+    pole.position.set(0, 2.5, 0)
+    group.add(pole)
+
+    this.checkoutSign = createTextPanel('Checkout Area', {
+      bgColor: '#2c3e50',
+      textColor: '#ffffff',
+      fontSize: 40,
+      width: 512,
+      height: 96,
+      meshWidth: 2,
+      meshHeight: 0.5,
+      borderRadius: 8
+    })
+    this.checkoutSign.position.set(0, 3, 0)
+    this.checkoutSign.name = 'checkout-sign'
+    group.add(this.checkoutSign)
+
+    const numPairs = Math.ceil(shelfConfig.numShelfUnits / 2)
+    const storeEndZ = (numPairs - 1) * shelfConfig.aisleSpacingZ + shelfConfig.shelfDepth / 2
+    group.position.set(0, 0, storeEndZ + 5)
+
+    log.info(MOD, `Checkout till created at z=${group.position.z.toFixed(1)}`)
+    return group
+  }
+
+  _triggerDrop() {
+    if (this.isDropping) return
+    this.isDropping = true
+
+    const addBtn = this.inspectionGroup.children.find(c => c.name === 'btn-add')
+    if (addBtn) addBtn.scale.set(0.9, 0.9, 0.9)
+
+    log.info(MOD, 'Drop animation started')
+  }
+
+  _completeDrop() {
+    this.isDropping = false
+
+    const entry = this._instanceRef?.entry
+    if (entry) {
+      this.cart.push({
+        id: entry.id,
+        title: entry.title || entry.productType,
+        price: entry.price || '$0.00',
+        productType: entry.productType
+      })
+      log.info(MOD, `Added to cart: "${entry.title || entry.productType}" ${entry.price || '$0.00'} — total: ${this.cart.length} items`)
+    }
+
+    this._clearInspectionGroup()
+
+    if (this.selectedProduct) {
+      this.scene.remove(this.selectedProduct)
+      this.selectedProduct = null
+    }
+    this._instanceRef = null
+
+    this.dof.disable()
+    this.transitionTo(Level.SIDE_ON)
   }
 }
