@@ -286,6 +286,23 @@ export function findProductByInstanceId(shelfGroup, meshType, instanceId) {
   return mesh.userData.registry.find(r => r.instanceId === instanceId) || null
 }
 
+export function findFrontProductByPosition(shelfGroup, x, y, tolerance) {
+  const registry = shelfGroup.userData.productRegistry
+  if (!registry) return null
+
+  const matches = registry.filter(r => {
+    if (r.isHidden) return false
+    const dx = Math.abs(r.originalPosition.x - x)
+    const dy = Math.abs(r.originalPosition.y - y)
+    return dx < tolerance && dy < tolerance
+  })
+
+  if (matches.length === 0) return null
+
+  matches.sort((a, b) => b.originalPosition.z - a.originalPosition.z)
+  return matches[0]
+}
+
 export function findShelfGroupForHit(hitObject) {
   let current = hitObject
   while (current) {

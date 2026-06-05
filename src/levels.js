@@ -9,16 +9,21 @@ import {
   getAllShelfGroups, shelfConfig,
   hideInstance, showInstance, spawnStandaloneMesh,
   getWorldPositionFromInstance, findProductByInstanceId,
-  findShelfGroupForHit, getAllInstanceMeshes, sharedBoxGeo, sharedCylGeo
+  findShelfGroupForHit, getAllInstanceMeshes, sharedBoxGeo, sharedCylGeo,
+  findFrontProductByPosition
 } from './shelf.js'
 import { createTrolley } from './trolley.js'
-import { hideDimmer, showCloseButton, hideCloseButton } from './ui.js'
+import { showCloseButton, hideCloseButton } from './ui.js'
 import { log } from './log.js'
+import { resetDOFSettings } from './debug.js'
 
 const MOD = 'Level'
 
 export const Level = { OVERVIEW: 1, SIDE_ON: 2, INSPECT: 3 }
 const LEVEL_NAMES = { 1: 'OVERVIEW', 2: 'SIDE_ON', 3: 'INSPECT' }
+
+const ANIM_PHASE = { NONE: 0, FORWARD: 1, TO_TARGET: 2 }
+const ANIM_THRESHOLD = 0.015
 
 let LERP_SPEED = 0.05
 
@@ -89,6 +94,13 @@ export class LevelManager {
     this.l3SavedLookAt = new THREE.Vector3()
 
     this._instanceRef = null
+
+    this.l3AnimPhase = ANIM_PHASE.NONE
+    this.l3IntermediatePos = new THREE.Vector3()
+    this.l3AnimStartTime = 0
+    this.l3AnimFrameCount = 0
+    this.l3AnimPrevPos = new THREE.Vector3()
+    this.l3Returning = false
 
     this.groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)
     this.isPanning = false
@@ -229,40 +241,46 @@ export class LevelManager {
     }
   }
 
+  _resolveFrontProduct(hits) {
+    for (const h of hits) {
+      if (h.instanceId === undefined || !h.object.userData?.isInstancedProducts) continue
+      const meshType = h.object.userData.productType
+      const shelfGroup = findShelfGroupForHit(h.object)
+      if (!shelfGroup) continue
+
+      const hitEntry = findProductByInstanceId(shelfGroup, meshType, h.instanceId)
+      if (!hitEntry || hitEntry.isHidden) continue
+
+      const worldPos = getWorldPositionFromInstance(shelfGroup, meshType, h.instanceId)
+      if (!worldPos) continue
+
+      const localPos = hitEntry.originalPosition
+      const frontEntry = findFrontProductByPosition(
+        shelfGroup, localPos.x, localPos.y, 0.02
+      )
+      if (!frontEntry) continue
+
+      return { shelfGroup, frontEntry, hitEntry, worldPos }
+    }
+    return null
+  }
+
   _hoverL2(raycaster) {
     const instanceMeshes = this._getInstanceMeshes()
     const hits = raycaster.intersectObjects(instanceMeshes, false)
 
-    const frontRowHit = hits.find(h => {
-      if (h.instanceId === undefined || !h.object.userData?.isInstancedProducts) return false
-      const shelfGroup = findShelfGroupForHit(h.object)
-      if (!shelfGroup) return false
-      const entry = findProductByInstanceId(shelfGroup, h.object.userData.productType, h.instanceId)
-      if (!entry || entry.isHidden) return false
-      const localZ = entry.originalPosition.z
-      const usableDepth = shelfConfig.shelfDepth - 0.1
-      const rowSpacing = usableDepth / shelfConfig.depthRows
-      const frontRowZ = -usableDepth / 2 + rowSpacing / 2 + (shelfConfig.depthRows - 1) * rowSpacing
-      return localZ >= frontRowZ - rowSpacing * 0.4
-    })
+    const resolved = this._resolveFrontProduct(hits)
 
-    if (frontRowHit) {
-      const { object, instanceId } = frontRowHit
-      const meshType = object.userData.productType
-      const shelfGroup = findShelfGroupForHit(object)
-      if (!shelfGroup) return
-
-      const entry = findProductByInstanceId(shelfGroup, meshType, instanceId)
-      if (!entry || entry.isHidden) return
-
-      const productKey = `${shelfGroup.userData.shelfUnitIndex}-${meshType}-${instanceId}`
+    if (resolved) {
+      const { shelfGroup, frontEntry } = resolved
+      const productKey = `${shelfGroup.userData.shelfUnitIndex}-${frontEntry.meshType}-${frontEntry.instanceId}`
       if (productKey !== this.hoveredProduct) {
         this._clearHover()
         this.hoveredProduct = productKey
 
-        const worldPos = getWorldPositionFromInstance(shelfGroup, meshType, instanceId)
+        const worldPos = getWorldPositionFromInstance(shelfGroup, frontEntry.meshType, frontEntry.instanceId)
         if (worldPos) {
-          const outline = createInstanceOutline(meshType, worldPos, entry.scale)
+          const outline = createInstanceOutline(frontEntry.meshType, worldPos, frontEntry.scale)
           this.scene.add(outline)
           this.hoveredProductOutline = outline
         }
@@ -372,33 +390,27 @@ export class LevelManager {
       } else if (this.currentLevel === Level.SIDE_ON) {
         const instanceMeshes = this._getInstanceMeshes()
         const hits = raycaster.intersectObjects(instanceMeshes, false)
-        const productHit = hits.find(h => h.instanceId !== undefined && h.object.userData?.isInstancedProducts)
 
-        if (productHit) {
-          const { object, instanceId } = productHit
-          const meshType = object.userData.productType
-          const shelfGroup = findShelfGroupForHit(object)
+        const resolved = this._resolveFrontProduct(hits)
 
-          if (!shelfGroup) return
+        if (resolved) {
+          const { shelfGroup, frontEntry, hitEntry } = resolved
 
-          const entry = findProductByInstanceId(shelfGroup, meshType, instanceId)
-          if (!entry || entry.isHidden) return
+          log.info(MOD, `L2→L3: clicked "${hitEntry.id}" at depth (row z=${hitEntry.originalPosition.z.toFixed(2)}), resolved to front "${frontEntry.id}" (row z=${frontEntry.originalPosition.z.toFixed(2)})`)
 
-          log.info(MOD, `L2→L3: clicked product "${entry.id}" (instance ${instanceId}, ${meshType})`)
-
-          const worldPos = getWorldPositionFromInstance(shelfGroup, meshType, instanceId)
+          const worldPos = getWorldPositionFromInstance(shelfGroup, frontEntry.meshType, frontEntry.instanceId)
           if (!worldPos) return
 
-          hideInstance(shelfGroup, meshType, instanceId)
+          hideInstance(shelfGroup, frontEntry.meshType, frontEntry.instanceId)
 
-          const standalone = spawnStandaloneMesh(meshType, worldPos, entry.scale, entry.color)
+          const standalone = spawnStandaloneMesh(frontEntry.meshType, worldPos, frontEntry.scale, frontEntry.color)
           this.scene.add(standalone)
 
           this._instanceRef = {
             shelfGroup,
-            meshType,
-            instanceId,
-            entry
+            meshType: frontEntry.meshType,
+            instanceId: frontEntry.instanceId,
+            entry: frontEntry
           }
 
           this._selectProduct(standalone)
@@ -438,13 +450,13 @@ export class LevelManager {
     log.info(MOD, `transitionTo(${LEVEL_NAMES[level]}) from ${fromLevel}`)
 
     this._clearHover()
+    resetDOFSettings(this.dof)
 
     if (level === Level.OVERVIEW) {
       this.targetPos.copy(LEVEL1_POS)
       this.targetLookAt.copy(LEVEL1_LOOKAT)
       this.targetFOV = LEVEL1_FOV
       this.panOffsetX = 0
-      hideDimmer()
       hideCloseButton()
     } else if (level === Level.SIDE_ON) {
       this.panOffsetX = 0
@@ -466,6 +478,7 @@ export class LevelManager {
     this.selectedProduct = product
     this.currentLevel = Level.INSPECT
     this.isTransitioning = true
+    this.l3Returning = false
 
     this.l3SavedCameraPos.copy(this.camera.position)
     this.l3SavedLookAt.copy(this.currentLookAt)
@@ -482,10 +495,16 @@ export class LevelManager {
     const baseFOV = scale > 1.0 ? LEVEL3_FOV + (scale - 1.0) * 10 : LEVEL3_FOV
     this.targetFOV = THREE.MathUtils.clamp(baseFOV, LEVEL3_ZOOM_FOV, LEVEL3_FOV)
 
-    const startWorldPos = product.position.clone()
+    this.l3IntermediatePos.copy(product.position).add(camDir.clone().multiplyScalar(-0.5))
+
+    this.l3AnimPhase = ANIM_PHASE.FORWARD
+    this.l3AnimStartTime = performance.now()
+    this.l3AnimFrameCount = 0
+    this.l3AnimPrevPos.copy(product.position)
+
     const focusDist = this.camera.position.distanceTo(this.inspectTargetPos)
 
-    log.info(MOD, `_selectProduct: scale=${scale.toFixed(2)} start=(${startWorldPos.x.toFixed(2)},${startWorldPos.y.toFixed(2)},${startWorldPos.z.toFixed(2)}) target=(${this.inspectTargetPos.x.toFixed(2)},${this.inspectTargetPos.y.toFixed(2)},${this.inspectTargetPos.z.toFixed(2)}) focusDist=${focusDist.toFixed(2)} FOV=${this.targetFOV.toFixed(1)}`)
+    log.info(MOD, `[_selectProduct START] scale=${scale.toFixed(2)} start=(${product.position.x.toFixed(2)},${product.position.y.toFixed(2)},${product.position.z.toFixed(2)}) intermediate=(${this.l3IntermediatePos.x.toFixed(2)},${this.l3IntermediatePos.y.toFixed(2)},${this.l3IntermediatePos.z.toFixed(2)}) target=(${this.inspectTargetPos.x.toFixed(2)},${this.inspectTargetPos.y.toFixed(2)},${this.inspectTargetPos.z.toFixed(2)}) focusDist=${focusDist.toFixed(2)} FOV=${this.targetFOV.toFixed(1)} lerpSpeed=${LERP_SPEED}`)
 
     this.dof.enable(focusDist)
     showCloseButton(() => this._returnToL2())
@@ -495,7 +514,7 @@ export class LevelManager {
     if (!this.selectedProduct) return
     this.isTransitioning = true
     this.currentLevel = Level.SIDE_ON
-    log.info(MOD, '_returnToL2 — returning product and zooming out')
+    this.l3Returning = true
 
     if (this._instanceRef) {
       const shelfGroup = this._instanceRef.shelfGroup
@@ -503,11 +522,22 @@ export class LevelManager {
       const worldPos = shelfGroup.localToWorld(localPos)
       this.selectedProduct.userData.originalPosition = worldPos
       this.selectedProduct.userData.originalRotation = this._instanceRef.entry.originalRotation.clone()
+
+      const camDir = new THREE.Vector3()
+      this.camera.getWorldDirection(camDir)
+      this.l3IntermediatePos.copy(worldPos).add(camDir.clone().multiplyScalar(-0.3))
     }
+
+    this.l3AnimPhase = ANIM_PHASE.FORWARD
+    this.l3AnimStartTime = performance.now()
+    this.l3AnimFrameCount = 0
+    this.l3AnimPrevPos.copy(this.selectedProduct.position)
 
     this.targetPos.copy(this.l3SavedCameraPos)
     this.targetLookAt.copy(this.l3SavedLookAt)
     this.targetFOV = LEVEL2_FOV
+
+    log.info(MOD, `[_returnToL2 START] product=(${this.selectedProduct.position.x.toFixed(2)},${this.selectedProduct.position.y.toFixed(2)},${this.selectedProduct.position.z.toFixed(2)}) intermediate=(${this.l3IntermediatePos.x.toFixed(2)},${this.l3IntermediatePos.y.toFixed(2)},${this.l3IntermediatePos.z.toFixed(2)}) target=(${this.selectedProduct.userData.originalPosition.x.toFixed(2)},${this.selectedProduct.userData.originalPosition.y.toFixed(2)},${this.selectedProduct.userData.originalPosition.z.toFixed(2)})`)
 
     this.dof.disable()
     hideCloseButton()
@@ -526,6 +556,15 @@ export class LevelManager {
         this._instanceRef = null
       }
     }
+  }
+
+  _logAnimFrame(phase, target, dist, extraLabel) {
+    const p = this.selectedProduct.position
+    const delta = p.clone().sub(this.l3AnimPrevPos).length()
+    const elapsed = performance.now() - this.l3AnimStartTime
+    const fovDelta = this.camera.fov - this.targetFOV
+    log.debug(MOD, `[L3 anim ${extraLabel}] frame=${this.l3AnimFrameCount} phase=${phase} t=${elapsed.toFixed(0)}ms pos=(${p.x.toFixed(3)},${p.y.toFixed(3)},${p.z.toFixed(3)}) target=(${target.x.toFixed(3)},${target.y.toFixed(3)},${target.z.toFixed(3)}) dist=${dist.toFixed(4)} delta=${delta.toFixed(4)} fov=${this.camera.fov.toFixed(1)}→${this.targetFOV.toFixed(1)}(Δ${fovDelta.toFixed(1)}) lerp=${LERP_SPEED}`)
+    this.l3AnimPrevPos.copy(p)
   }
 
   update() {
@@ -558,36 +597,80 @@ export class LevelManager {
       }
       this.camera.lookAt(this.currentLookAt)
 
-      if (this.selectedProduct && this.currentLevel === Level.INSPECT) {
-        const prodDist = this.selectedProduct.position.distanceTo(this.inspectTargetPos)
+      if (this.selectedProduct && this.currentLevel === Level.INSPECT && !this.l3Returning) {
+        this.l3AnimFrameCount++
         const focusDist = this.camera.position.distanceTo(this.selectedProduct.position)
         this.dof.updateFocus(focusDist)
-        if (prodDist > 0.02) {
-          this.selectedProduct.position.lerp(this.inspectTargetPos, LERP_SPEED)
+
+        if (this.l3AnimPhase === ANIM_PHASE.FORWARD) {
+          const dist = this.selectedProduct.position.distanceTo(this.l3IntermediatePos)
+          if (dist > ANIM_THRESHOLD) {
+            this.selectedProduct.position.lerp(this.l3IntermediatePos, LERP_SPEED)
+            done = false
+            if (this.l3AnimFrameCount <= 30 || this.l3AnimFrameCount % 5 === 0) {
+              this._logAnimFrame('FWD→intermediate', this.l3IntermediatePos, dist, 'L3-pull')
+            }
+          } else {
+            this.selectedProduct.position.copy(this.l3IntermediatePos)
+            this.l3AnimPhase = ANIM_PHASE.TO_TARGET
+            log.debug(MOD, `[L3 anim phase switch] FORWARD→TO_TARGET at frame ${this.l3AnimFrameCount} t=${(performance.now() - this.l3AnimStartTime).toFixed(0)}ms`)
+          }
+        }
+
+        if (this.l3AnimPhase === ANIM_PHASE.TO_TARGET) {
+          const dist = this.selectedProduct.position.distanceTo(this.inspectTargetPos)
+          if (dist > ANIM_THRESHOLD) {
+            this.selectedProduct.position.lerp(this.inspectTargetPos, LERP_SPEED)
+            done = false
+            if (this.l3AnimFrameCount <= 30 || this.l3AnimFrameCount % 5 === 0) {
+              this._logAnimFrame('TO_TARGET', this.inspectTargetPos, dist, 'L3-pull')
+            }
+          } else {
+            this.selectedProduct.position.copy(this.inspectTargetPos)
+            this.l3AnimPhase = ANIM_PHASE.NONE
+            const elapsed = performance.now() - this.l3AnimStartTime
+            log.info(MOD, `[L3 anim COMPLETE] frames=${this.l3AnimFrameCount} t=${elapsed.toFixed(0)}ms final=(${this.inspectTargetPos.x.toFixed(2)},${this.inspectTargetPos.y.toFixed(2)},${this.inspectTargetPos.z.toFixed(2)})`)
+          }
+        }
+
+        if (this.l3AnimPhase !== ANIM_PHASE.NONE) {
           done = false
-          if (this._l3FrameCount === undefined) this._l3FrameCount = 0
-          this._l3FrameCount++
-          if (this._l3FrameCount % 15 === 1) {
-            const p = this.selectedProduct.position
-            log.debug(MOD, `L3 product lerp #${this._l3FrameCount}: pos=(${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)}) dist=${prodDist.toFixed(3)} fov=${this.camera.fov.toFixed(1)}`)
-          }
-        } else {
-          this.selectedProduct.position.copy(this.inspectTargetPos)
-          if (this._l3FrameCount !== undefined) {
-            log.debug(MOD, `L3 product arrived after ${this._l3FrameCount} frames at (${this.inspectTargetPos.x.toFixed(2)},${this.inspectTargetPos.y.toFixed(2)},${this.inspectTargetPos.z.toFixed(2)})`)
-            this._l3FrameCount = undefined
-          }
         }
       }
 
-      if (this.selectedProduct && this.currentLevel === Level.SIDE_ON) {
-        const origPos = this.selectedProduct.userData.originalPosition
-        const posDist2 = this.selectedProduct.position.distanceTo(origPos)
-        if (posDist2 > 0.02) {
-          this.selectedProduct.position.lerp(origPos, LERP_SPEED)
-          done = false
-        } else {
-          this.selectedProduct.position.copy(origPos)
+      if (this.selectedProduct && this.currentLevel === Level.SIDE_ON && this.l3Returning) {
+        this.l3AnimFrameCount++
+
+        if (this.l3AnimPhase === ANIM_PHASE.FORWARD) {
+          const dist = this.selectedProduct.position.distanceTo(this.l3IntermediatePos)
+          if (dist > ANIM_THRESHOLD) {
+            this.selectedProduct.position.lerp(this.l3IntermediatePos, LERP_SPEED)
+            done = false
+            if (this.l3AnimFrameCount <= 30 || this.l3AnimFrameCount % 5 === 0) {
+              this._logAnimFrame('FWD→intermediate', this.l3IntermediatePos, dist, 'L3-return')
+            }
+          } else {
+            this.selectedProduct.position.copy(this.l3IntermediatePos)
+            this.l3AnimPhase = ANIM_PHASE.TO_TARGET
+            log.debug(MOD, `[L3 return phase switch] FORWARD→TO_TARGET at frame ${this.l3AnimFrameCount} t=${(performance.now() - this.l3AnimStartTime).toFixed(0)}ms`)
+          }
+        }
+
+        if (this.l3AnimPhase === ANIM_PHASE.TO_TARGET) {
+          const origPos = this.selectedProduct.userData.originalPosition
+          const dist = this.selectedProduct.position.distanceTo(origPos)
+          if (dist > ANIM_THRESHOLD) {
+            this.selectedProduct.position.lerp(origPos, LERP_SPEED)
+            done = false
+            if (this.l3AnimFrameCount <= 30 || this.l3AnimFrameCount % 5 === 0) {
+              this._logAnimFrame('TO_TARGET', origPos, dist, 'L3-return')
+            }
+          } else {
+            this.selectedProduct.position.copy(origPos)
+            this.l3AnimPhase = ANIM_PHASE.NONE
+            const elapsed = performance.now() - this.l3AnimStartTime
+            log.info(MOD, `[L3 return COMPLETE] frames=${this.l3AnimFrameCount} t=${elapsed.toFixed(0)}ms`)
+          }
         }
 
         const origRot = this.selectedProduct.userData.originalRotation
@@ -601,6 +684,10 @@ export class LevelManager {
           this.selectedProduct.rotation.x = origRot.x
           this.selectedProduct.rotation.y = origRot.y
         }
+
+        if (this.l3AnimPhase !== ANIM_PHASE.NONE) {
+          done = false
+        }
       }
 
       if (Math.abs(this.camera.fov - this.targetFOV) > 0.1) {
@@ -613,6 +700,7 @@ export class LevelManager {
 
       if (done) {
         this.isTransitioning = false
+        this.l3Returning = false
         log.info(MOD, `Transition complete — now at ${LEVEL_NAMES[this.currentLevel]}`)
         if (this.currentLevel === Level.SIDE_ON && this.selectedProduct) {
           this._cleanupStandalone()

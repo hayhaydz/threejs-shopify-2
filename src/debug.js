@@ -3,6 +3,7 @@ import GUI from 'lil-gui'
 import * as THREE from 'three'
 import { log } from './log.js'
 import { shelfConfig, rebuildAisleSystem, getStoreStats, getAllProducts, getWorldPositionFromInstance, hideInstance, spawnStandaloneMesh } from './shelf.js'
+import { DOF_ENABLED_DEFAULTS } from './dof.js'
 
 const MOD = 'Debug'
 
@@ -12,6 +13,19 @@ let axesHelper = null
 let gridHelper = null
 let sceneRef = null
 let levelManagerRef = null
+let dofRef = null
+
+const _debounceTimers = {}
+function debouncedLog(key, label, values, delay = 400) {
+  clearTimeout(_debounceTimers[key])
+  _debounceTimers[key] = setTimeout(() => {
+    console.groupCollapsed(`[DOF] ${label}`)
+    for (const [k, v] of Object.entries(values)) {
+      console.log(`${k}:`, v)
+    }
+    console.groupEnd()
+  }, delay)
+}
 
 const readouts = {
   shelfUnits: 0,
@@ -47,7 +61,11 @@ const settings = {
   forceL1: () => {},
   forceL2: () => {},
   forceL3: () => {},
-  rebuildStore: () => {}
+  rebuildStore: () => {},
+  dofEnabled: false,
+  dofFocus: 2.0,
+  dofAperture: DOF_ENABLED_DEFAULTS.aperture,
+  dofMaxBlur: DOF_ENABLED_DEFAULTS.maxblur
 }
 
 function doRebuild() {
@@ -68,9 +86,10 @@ function updateReadouts(stats) {
   readouts.storeDepth = parseFloat((Math.ceil(shelfConfig.numShelfUnits / 2) * shelfConfig.aisleSpacingZ + shelfConfig.shelfDepth * 2 + shelfConfig.aisleGap).toFixed(1))
 }
 
-export function initDebug(camera, levelManager, scene) {
+export function initDebug(camera, levelManager, scene, dof) {
   sceneRef = scene
   levelManagerRef = levelManager
+  dofRef = dof
 
   stats = new Stats()
   stats.showPanel(0)
@@ -154,6 +173,54 @@ export function initDebug(camera, levelManager, scene) {
   })
   moveFolder.add(settings, 'l2PanClamp', 2, 20, 0.5).name('L2 Pan Clamp').listen().onChange(v => {
     levelManager._setL2PanClamp(v)
+  })
+
+  const dofFolder = camFolder.addFolder('Depth of Field')
+  dofFolder.add(settings, 'dofEnabled').name('Enabled').onChange(v => {
+    if (dofRef) {
+      dofRef.enabled = v
+      dofRef.bokehPass.enabled = v
+      if (v) {
+        dofRef.bokehPass.uniforms['focus'].value = settings.dofFocus
+        dofRef.bokehPass.uniforms['aperture'].value = settings.dofAperture
+        dofRef.bokehPass.uniforms['maxblur'].value = settings.dofMaxBlur
+      }
+    }
+    debouncedLog('dof-toggle', 'DOF Toggled', { enabled: v })
+  })
+  dofFolder.add(settings, 'dofFocus', 0.1, 20, 0.1).name('Focus Distance').listen().onChange(v => {
+    if (dofRef) {
+      dofRef.manualFocus = true
+      if (!dofRef.enabled) {
+        dofRef.enabled = true
+        dofRef.bokehPass.enabled = true
+        settings.dofEnabled = true
+      }
+      dofRef.bokehPass.uniforms['focus'].value = v
+    }
+    debouncedLog('dof-focus', 'Focus Changed', { focus: v })
+  })
+  dofFolder.add(settings, 'dofAperture', 0.0001, 0.02, 0.0001).name('Aperture').listen().onChange(v => {
+    if (dofRef) {
+      if (!dofRef.enabled) {
+        dofRef.enabled = true
+        dofRef.bokehPass.enabled = true
+        settings.dofEnabled = true
+      }
+      dofRef.bokehPass.uniforms['aperture'].value = v
+    }
+    debouncedLog('dof-aperture', 'Aperture Changed', { aperture: v })
+  })
+  dofFolder.add(settings, 'dofMaxBlur', 0.001, 0.05, 0.001).name('Max Blur').listen().onChange(v => {
+    if (dofRef) {
+      if (!dofRef.enabled) {
+        dofRef.enabled = true
+        dofRef.bokehPass.enabled = true
+        settings.dofEnabled = true
+      }
+      dofRef.bokehPass.uniforms['maxblur'].value = v
+    }
+    debouncedLog('dof-maxblur', 'Max Blur Changed', { maxblur: v })
   })
 
   const levelFolder = gui.addFolder('Level')
@@ -270,4 +337,18 @@ export function syncSettings(levelManager, camera) {
   settings.l1PanSpeed = levelManager.l1PanSpeed
   settings.l2PanSpeed = levelManager.l2PanSpeed
   settings.l2PanClamp = levelManager.l2PanClamp
+  if (dofRef && dofRef.enabled && !dofRef.manualFocus) {
+    settings.dofFocus = parseFloat(dofRef.bokehPass.uniforms['focus'].value.toFixed(2))
+  }
+}
+
+export function resetDOFSettings(dof) {
+  settings.dofEnabled = false
+  settings.dofFocus = 2.0
+  settings.dofAperture = DOF_ENABLED_DEFAULTS.aperture
+  settings.dofMaxBlur = DOF_ENABLED_DEFAULTS.maxblur
+  if (dof) {
+    dof.disable()
+    dof.reset()
+  }
 }

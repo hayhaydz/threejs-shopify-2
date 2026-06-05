@@ -7,10 +7,16 @@ import { log } from './log.js'
 
 const MOD = 'DOF'
 
+export const DOF_ENABLED_DEFAULTS = {
+  aperture: 0.004,
+  maxblur: 0.015
+}
+
 export class DOFManager {
   constructor(renderer, scene, camera) {
     this.composer = new EffectComposer(renderer)
     this.enabled = false
+    this.manualFocus = false
 
     this.renderPass = new RenderPass(scene, camera)
     this.composer.addPass(this.renderPass)
@@ -31,21 +37,30 @@ export class DOFManager {
 
   enable(focusDistance) {
     this.enabled = true
+    this.manualFocus = false
     this.bokehPass.enabled = true
     this.bokehPass.uniforms['focus'].value = focusDistance
-    this.bokehPass.uniforms['aperture'].value = 0.004
-    this.bokehPass.uniforms['maxblur'].value = 0.015
+    this.bokehPass.uniforms['aperture'].value = DOF_ENABLED_DEFAULTS.aperture
+    this.bokehPass.uniforms['maxblur'].value = DOF_ENABLED_DEFAULTS.maxblur
     log.info(MOD, `DOF enabled — focus=${focusDistance.toFixed(2)}`)
   }
 
   disable() {
     this.enabled = false
+    this.manualFocus = false
     this.bokehPass.enabled = false
     log.info(MOD, 'DOF disabled')
   }
 
+  reset() {
+    this.manualFocus = false
+    this.bokehPass.uniforms['aperture'].value = DOF_ENABLED_DEFAULTS.aperture
+    this.bokehPass.uniforms['maxblur'].value = DOF_ENABLED_DEFAULTS.maxblur
+    log.info(MOD, 'DOF reset to defaults')
+  }
+
   updateFocus(focusDistance) {
-    if (this.enabled) {
+    if (this.enabled && !this.manualFocus) {
       this.bokehPass.uniforms['focus'].value = focusDistance
     }
   }

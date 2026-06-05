@@ -22,7 +22,7 @@ const dof = new DOFManager(renderer, scene, camera)
 const input = new InputManager(camera, renderer.domElement)
 const levelManager = new LevelManager(camera, aisleSystem, input, scene, dof)
 
-initDebug(camera, levelManager, scene)
+initDebug(camera, levelManager, scene, dof)
 
 window.addEventListener('resize', () => {
   updateCameraAspect(camera)
