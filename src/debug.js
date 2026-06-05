@@ -2,7 +2,7 @@ import Stats from 'stats.js'
 import GUI from 'lil-gui'
 import * as THREE from 'three'
 import { log } from './log.js'
-import { shelfConfig, rebuildAisleSystem, getStoreStats } from './shelf.js'
+import { shelfConfig, rebuildAisleSystem, getStoreStats, getAllProducts, getWorldPositionFromInstance, hideInstance, spawnStandaloneMesh } from './shelf.js'
 
 const MOD = 'Debug'
 
@@ -25,6 +25,7 @@ const settings = {
   showStats: true,
   showAxes: false,
   showGrid: true,
+  showClickZones: false,
   cameraFOV: 30,
   cameraPosX: 0,
   cameraPosY: 15,
@@ -33,6 +34,9 @@ const settings = {
   cameraRotY: 0,
   cameraRotZ: 0,
   lerpSpeed: 0.05,
+  l1PanSpeed: 0.01,
+  l2PanSpeed: 0.01,
+  l2PanClamp: 8,
   ambientIntensity: 0.6,
   dirIntensity: 0.8,
   dirPosX: 5,
@@ -61,7 +65,7 @@ function updateReadouts(stats) {
   readouts.products = stats.products
   readouts.hiddenShelves = stats.hiddenShelves
   readouts.storeWidth = shelfConfig.shelfWidth
-  readouts.storeDepth = parseFloat((shelfConfig.numAisles * shelfConfig.aisleSpacingZ + shelfConfig.shelfDepth * 2 + shelfConfig.aisleGap).toFixed(1))
+  readouts.storeDepth = parseFloat((Math.ceil(shelfConfig.numShelfUnits / 2) * shelfConfig.aisleSpacingZ + shelfConfig.shelfDepth * 2 + shelfConfig.aisleGap).toFixed(1))
 }
 
 export function initDebug(camera, levelManager, scene) {
@@ -82,9 +86,9 @@ export function initDebug(camera, levelManager, scene) {
   settings.cameraPosX = camera.position.x
   settings.cameraPosY = camera.position.y
   settings.cameraPosZ = camera.position.z
-  settings.cameraRotX = camera.rotation.x
-  settings.cameraRotY = camera.rotation.y
-  settings.cameraRotZ = camera.rotation.z
+  settings.cameraRotX = parseFloat(THREE.MathUtils.radToDeg(camera.rotation.x).toFixed(1))
+  settings.cameraRotY = parseFloat(THREE.MathUtils.radToDeg(camera.rotation.y).toFixed(1))
+  settings.cameraRotZ = parseFloat(THREE.MathUtils.radToDeg(camera.rotation.z).toFixed(1))
 
   settings.forceL1 = () => {
     levelManager.transitionTo(1)
@@ -97,10 +101,23 @@ export function initDebug(camera, levelManager, scene) {
       log.warn(MOD, 'Force L3 requires being in L2 first')
       return
     }
-    const products = []
-    scene.traverse(c => { if (c.userData?.isProduct) products.push(c) })
-    if (products.length > 0) {
-      levelManager._selectProduct(products[0])
+    const aisleSystem = scene.children.find(c => c.name === 'aisleSystem')
+    if (!aisleSystem) return
+    const products = getAllProducts(aisleSystem)
+    const visible = products.find(p => !p.isHidden)
+    if (visible) {
+      const worldPos = getWorldPositionFromInstance(visible.shelfGroup, visible.meshType, visible.instanceId)
+      if (!worldPos) return
+      hideInstance(visible.shelfGroup, visible.meshType, visible.instanceId)
+      const standalone = spawnStandaloneMesh(visible.meshType, worldPos, visible.scale, visible.color)
+      scene.add(standalone)
+      levelManager._instanceRef = {
+        shelfGroup: visible.shelfGroup,
+        meshType: visible.meshType,
+        instanceId: visible.instanceId,
+        entry: visible
+      }
+      levelManager._selectProduct(standalone)
     }
   }
 
@@ -110,7 +127,6 @@ export function initDebug(camera, levelManager, scene) {
 
   updateReadouts()
 
-  // ─── Camera ───
   const camFolder = gui.addFolder('Camera')
   camFolder.add(settings, 'cameraFOV', 1, 120, 0.5).name('FOV').onChange(v => {
     camera.fov = v
@@ -119,11 +135,27 @@ export function initDebug(camera, levelManager, scene) {
   camFolder.add(settings, 'cameraPosX', -30, 30, 0.1).name('Pos X').onChange(v => { camera.position.x = v })
   camFolder.add(settings, 'cameraPosY', 0, 30, 0.1).name('Pos Y').onChange(v => { camera.position.y = v })
   camFolder.add(settings, 'cameraPosZ', -30, 30, 0.1).name('Pos Z').onChange(v => { camera.position.z = v })
-  camFolder.add(settings, 'cameraRotX', -Math.PI, Math.PI, 0.01).name('Rot X').onChange(v => { camera.rotation.x = v })
-  camFolder.add(settings, 'cameraRotY', -Math.PI, Math.PI, 0.01).name('Rot Y').onChange(v => { camera.rotation.y = v })
-  camFolder.add(settings, 'cameraRotZ', -Math.PI, Math.PI, 0.01).name('Rot Z').onChange(v => { camera.rotation.z = v })
+  camFolder.add(settings, 'cameraRotX', -180, 180, 1).name('Pitch (°)').onChange(v => {
+    camera.rotation.x = THREE.MathUtils.degToRad(v)
+  })
+  camFolder.add(settings, 'cameraRotY', -180, 180, 1).name('Yaw (°)').onChange(v => {
+    camera.rotation.y = THREE.MathUtils.degToRad(v)
+  })
+  camFolder.add(settings, 'cameraRotZ', -180, 180, 1).name('Roll (°)').onChange(v => {
+    camera.rotation.z = THREE.MathUtils.degToRad(v)
+  })
 
-  // ─── Level ───
+  const moveFolder = camFolder.addFolder('Movement')
+  moveFolder.add(settings, 'l1PanSpeed', 0.001, 0.05, 0.001).name('L1 Pan Speed').listen().onChange(v => {
+    levelManager._setL1PanSpeed(v)
+  })
+  moveFolder.add(settings, 'l2PanSpeed', 0.001, 0.05, 0.001).name('L2 Pan Speed').listen().onChange(v => {
+    levelManager._setL2PanSpeed(v)
+  })
+  moveFolder.add(settings, 'l2PanClamp', 2, 20, 0.5).name('L2 Pan Clamp').listen().onChange(v => {
+    levelManager._setL2PanClamp(v)
+  })
+
   const levelFolder = gui.addFolder('Level')
   levelFolder.add(settings, 'currentLevel').name('Current').listen().disable()
   levelFolder.add(settings, 'lerpSpeed', 0.01, 0.2, 0.005).name('Lerp Speed').onChange(v => {
@@ -133,7 +165,6 @@ export function initDebug(camera, levelManager, scene) {
   levelFolder.add(settings, 'forceL2').name('→ L2 Side-On')
   levelFolder.add(settings, 'forceL3').name('→ L3 Inspect')
 
-  // ─── Lighting ───
   const ambientLight = scene.children.find(c => c.isAmbientLight)
   const dirLight = scene.children.find(c => c.isDirectionalLight)
   const lightFolder = gui.addFolder('Lighting')
@@ -151,12 +182,11 @@ export function initDebug(camera, levelManager, scene) {
     lightFolder.add(settings, 'dirPosZ', -20, 20, 0.5).name('Dir Z').onChange(v => { dirLight.position.z = v })
   }
 
-  // ─── Shelf Products ───
   const productFolder = gui.addFolder('Shelf Products')
-  productFolder.add(shelfConfig, 'productsPerTier', 12, 96, 1).name('Products / Tier').listen()
-  productFolder.add(shelfConfig, 'depthRows', 1, 10, 1).name('Depth Rows').listen()
-  productFolder.add(shelfConfig, 'numTiers', 1, 8, 1).name('Num Tiers').listen()
-  productFolder.add(shelfConfig, 'shelfHeight', 1.0, 6.0, 0.1).name('Shelf Height').listen()
+  productFolder.add(shelfConfig, 'productsPerTier', 12, 200, 1).name('Products / Tier').listen()
+  productFolder.add(shelfConfig, 'depthRows', 1, 20, 1).name('Depth Rows').listen()
+  productFolder.add(shelfConfig, 'numTiers', 1, 12, 1).name('Num Tiers').listen()
+  productFolder.add(shelfConfig, 'shelfHeight', 1.0, 10.0, 0.1).name('Shelf Height').listen()
   productFolder.add(shelfConfig, 'productScaleMin', 0.3, 1.0, 0.05).name('Scale Min').listen()
   productFolder.add(shelfConfig, 'productScaleRange', 0.1, 1.5, 0.05).name('Scale Range').listen()
   productFolder.add(shelfConfig, 'skipHiddenProducts').name('Skip Hidden').listen()
@@ -171,18 +201,16 @@ export function initDebug(camera, levelManager, scene) {
     })
   })
 
-  // ─── Aisle Layout ───
   const aisleFolder = gui.addFolder('Aisle Layout')
-  aisleFolder.add(shelfConfig, 'numAisles', 1, 8, 1).name('Num Aisles').listen()
-  aisleFolder.add(shelfConfig, 'shelfWidth', 6, 30, 0.5).name('Aisle Length').listen()
-  aisleFolder.add(shelfConfig, 'aisleGap', 2.0, 6.0, 0.1).name('Aisle Gap').listen()
-  aisleFolder.add(shelfConfig, 'aisleSpacingZ', 3.0, 8.0, 0.1).name('Aisle Spacing').listen()
-  aisleFolder.add(shelfConfig, 'shelfDepth', 0.5, 2.0, 0.1).name('Shelf Depth').listen()
+  aisleFolder.add(shelfConfig, 'numShelfUnits', 1, 32, 1).name('Shelf Units').listen()
+  aisleFolder.add(shelfConfig, 'shelfWidth', 6, 60, 0.5).name('Aisle Length').listen()
+  aisleFolder.add(shelfConfig, 'aisleGap', 2.0, 12.0, 0.1).name('Aisle Gap').listen()
+  aisleFolder.add(shelfConfig, 'aisleSpacingZ', 3.0, 16.0, 0.1).name('Aisle Spacing').listen()
+  aisleFolder.add(shelfConfig, 'shelfDepth', 0.5, 4.0, 0.1).name('Shelf Depth').listen()
   aisleFolder.add(readouts, 'storeWidth').name('Store Width').listen().disable()
   aisleFolder.add(readouts, 'storeDepth').name('Store Depth').listen().disable()
   aisleFolder.add(settings, 'rebuildStore').name('⟳ Rebuild Store')
 
-  // ─── Debug ───
   const debugFolder = gui.addFolder('Debug')
   debugFolder.add(settings, 'showStats').name('Stats Panel').onChange(v => {
     stats.dom.style.display = v ? 'block' : 'none'
@@ -192,6 +220,17 @@ export function initDebug(camera, levelManager, scene) {
   })
   debugFolder.add(settings, 'showGrid').name('Grid Helper').onChange(v => {
     if (gridHelper) gridHelper.visible = v
+  })
+  debugFolder.add(settings, 'showClickZones').name('Click Zones').onChange(v => {
+    shelfConfig.showClickZones = v
+    const aisleSystem = sceneRef.children.find(c => c.name === 'aisleSystem')
+    if (aisleSystem) {
+      aisleSystem.traverse(c => {
+        if (c.userData?.clickZone && c.material) {
+          c.material.visible = v
+        }
+      })
+    }
   })
 
   axesHelper = new THREE.AxesHelper(5)
@@ -223,9 +262,12 @@ export function syncSettings(levelManager, camera) {
     settings.cameraPosX = camera.position.x
     settings.cameraPosY = camera.position.y
     settings.cameraPosZ = camera.position.z
-    settings.cameraRotX = camera.rotation.x
-    settings.cameraRotY = camera.rotation.y
-    settings.cameraRotZ = camera.rotation.z
+    settings.cameraRotX = parseFloat(THREE.MathUtils.radToDeg(camera.rotation.x).toFixed(1))
+    settings.cameraRotY = parseFloat(THREE.MathUtils.radToDeg(camera.rotation.y).toFixed(1))
+    settings.cameraRotZ = parseFloat(THREE.MathUtils.radToDeg(camera.rotation.z).toFixed(1))
     settings.cameraFOV = camera.fov
   }
+  settings.l1PanSpeed = levelManager.l1PanSpeed
+  settings.l2PanSpeed = levelManager.l2PanSpeed
+  settings.l2PanClamp = levelManager.l2PanClamp
 }

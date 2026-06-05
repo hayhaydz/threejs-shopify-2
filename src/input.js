@@ -15,6 +15,7 @@ export class InputManager {
     this.onDragMove = null
     this.onDragEnd = null
     this.onEscape = null
+    this.onHover = null
 
     this.isDragging = false
     this.pointerIsDown = false
@@ -51,7 +52,13 @@ export class InputManager {
   }
 
   _handlePointerMove(event) {
-    if (!this.pointerIsDown) return
+    this._updateMouse(event)
+
+    if (!this.pointerIsDown) {
+      this.raycaster.setFromCamera(this.mouse, this.camera)
+      if (this.onHover) this.onHover(this.raycaster, this.mouse)
+      return
+    }
 
     const dx = event.clientX - this.dragStart.x
     const dy = event.clientY - this.dragStart.y
