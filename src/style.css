@@ -12,7 +12,7 @@ canvas {
   display: block;
   width: 100vw;
   height: 100vh;
-  cursor: grab;
+  cursor: pointer;
 }
 
 body.dragging canvas {

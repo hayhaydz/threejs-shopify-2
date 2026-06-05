@@ -26,6 +26,7 @@ const ANIM_PHASE = { NONE: 0, FORWARD: 1, TO_TARGET: 2 }
 const ANIM_THRESHOLD = 0.015
 
 let LERP_SPEED = 0.05
+let PRODUCT_LERP_SPEED = 0.12
 
 function createFloorLabel(text) {
   const canvas = document.createElement('canvas')
@@ -50,6 +51,24 @@ function createFloorLabel(text) {
   mesh.rotation.x = -Math.PI / 2
   mesh.name = '__floorLabel__'
   return mesh
+}
+
+function createGridTileTexture() {
+  const size = 128
+  const canvas = document.createElement('canvas')
+  canvas.width = size
+  canvas.height = size
+  const ctx = canvas.getContext('2d')
+  ctx.clearRect(0, 0, size, size)
+  ctx.fillStyle = 'rgba(25, 55, 95, 0.25)'
+  ctx.fillRect(0, 0, size, size)
+  ctx.strokeStyle = '#3388ff'
+  ctx.lineWidth = 3
+  ctx.strokeRect(1.5, 1.5, size - 3, size - 3)
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.minFilter = THREE.LinearFilter
+  texture.magFilter = THREE.LinearFilter
+  return texture
 }
 
 function createInstanceOutline(meshType, position, scale) {
@@ -125,10 +144,16 @@ export class LevelManager {
     this.trolley = createTrolley()
     this.trolleyTarget = new THREE.Vector3(0, 0, this.gridZPositions[1])
     this.trolley.position.copy(this.trolleyTarget)
+    this.trolleyPath = []
+    this.trolleyWaypointIndex = 0
+    this.trolleyTargetAngle = 0
     scene.add(this.trolley)
 
     this.cart = []
     this.isDropping = false
+
+    this.trolleySpeed = 0.25
+    this.trolleyRotationSpeed = 0.15
 
     this.inspectionGroup = new THREE.Group()
     this.inspectionGroup.name = 'inspectionGroup'
@@ -145,10 +170,15 @@ export class LevelManager {
 
   _buildGridPositions() {
     this.gridXPositions = []
-    const halfWidth = shelfConfig.shelfWidth / 2 - 1
-    for (let x = -halfWidth; x <= halfWidth; x += 2) {
-      this.gridXPositions.push(x)
+    const gridStep = 1
+    const halfWidth = shelfConfig.shelfWidth / 2
+    for (let x = -halfWidth; x <= halfWidth; x += gridStep) {
+      this.gridXPositions.push(parseFloat(x.toFixed(1)))
     }
+    const sideLaneOffset = shelfConfig.shelfWidth / 2 + 1
+    this.gridXPositions.push(-sideLaneOffset)
+    this.gridXPositions.push(sideLaneOffset)
+    this.gridXPositions.sort((a, b) => a - b)
 
     const numPairs = Math.ceil(shelfConfig.numShelfUnits / 2)
     this.gridZPositions = [-1]
@@ -162,6 +192,190 @@ export class LevelManager {
     }
     const lastZ = (numPairs - 1) * shelfConfig.aisleSpacingZ + shelfConfig.shelfDepth / 2 + shelfConfig.aisleGap
     this.gridZPositions.push(parseFloat(lastZ.toFixed(1)))
+
+    this._buildShelfBounds()
+    this._buildNavGrid()
+    this._buildGridTiles()
+  }
+
+  _buildShelfBounds() {
+    this.shelfBounds = []
+    const numPairs = Math.ceil(shelfConfig.numShelfUnits / 2)
+    for (let p = 0; p < numPairs; p++) {
+      const pairZ = p * shelfConfig.aisleSpacingZ
+      this.shelfBounds.push({
+        xMin: -shelfConfig.shelfWidth / 2,
+        xMax: shelfConfig.shelfWidth / 2,
+        zMin: pairZ - shelfConfig.shelfDepth / 2,
+        zMax: pairZ + shelfConfig.shelfDepth / 2
+      })
+      this.shelfBounds.push({
+        xMin: -shelfConfig.shelfWidth / 2,
+        xMax: shelfConfig.shelfWidth / 2,
+        zMin: pairZ - shelfConfig.shelfDepth - shelfConfig.shelfDepth / 2,
+        zMax: pairZ - shelfConfig.shelfDepth + shelfConfig.shelfDepth / 2
+      })
+    }
+  }
+
+  _isInsideShelf(x, z) {
+    for (const b of this.shelfBounds) {
+      if (x >= b.xMin && x <= b.xMax && z >= b.zMin && z <= b.zMax) return true
+    }
+    return false
+  }
+
+  _buildNavGrid() {
+    this.navBlocked = new Set()
+    for (let zi = 0; zi < this.gridZPositions.length; zi++) {
+      for (let xi = 0; xi < this.gridXPositions.length; xi++) {
+        if (this._isInsideShelf(this.gridXPositions[xi], this.gridZPositions[zi])) {
+          this.navBlocked.add(`${xi},${zi}`)
+        }
+      }
+    }
+  }
+
+  _buildGridTiles() {
+    if (this.gridTileMesh) {
+      this.scene.remove(this.gridTileMesh)
+      this.gridTileMesh.geometry.dispose()
+      this.gridTileMesh.material.dispose()
+      if (this.gridTileMesh.material.map) this.gridTileMesh.material.map.dispose()
+    }
+
+    const tileSize = 1.0
+    const geo = new THREE.PlaneGeometry(tileSize, tileSize)
+    const mat = new THREE.MeshBasicMaterial({
+      transparent: true,
+      opacity: 0.25,
+      map: createGridTileTexture(),
+      depthWrite: false,
+      side: THREE.DoubleSide
+    })
+
+    let count = 0
+    for (let zi = 0; zi < this.gridZPositions.length; zi++) {
+      for (let xi = 0; xi < this.gridXPositions.length; xi++) {
+        if (!this.navBlocked.has(`${xi},${zi}`)) count++
+      }
+    }
+
+    this.gridTileMesh = new THREE.InstancedMesh(geo, mat, count)
+    this.gridTileMesh.name = 'gridTiles'
+
+    const dummy = new THREE.Object3D()
+    const baseColor = new THREE.Color(0xffffff)
+    let idx = 0
+    this.gridTileMap = {}
+
+    for (let zi = 0; zi < this.gridZPositions.length; zi++) {
+      for (let xi = 0; xi < this.gridXPositions.length; xi++) {
+        const key = `${xi},${zi}`
+        if (this.navBlocked.has(key)) continue
+        dummy.position.set(this.gridXPositions[xi], 0.02, this.gridZPositions[zi])
+        dummy.rotation.set(-Math.PI / 2, 0, 0)
+        dummy.scale.set(1, 1, 1)
+        dummy.updateMatrix()
+        this.gridTileMesh.setMatrixAt(idx, dummy.matrix)
+        this.gridTileMesh.setColorAt(idx, baseColor)
+        this.gridTileMap[key] = idx
+        idx++
+      }
+    }
+
+    this.gridTileMesh.instanceMatrix.needsUpdate = true
+    this.gridTileMesh.instanceColor.needsUpdate = true
+    this.gridTileMesh.userData.isGridTile = true
+    this.scene.add(this.gridTileMesh)
+
+    this._hoveredGridKey = null
+  }
+
+  _updateGridHover(raycaster) {
+    if (!this.gridTileMesh) return
+
+    if (this._hoveredGridKey !== null) {
+      const prevIdx = this.gridTileMap[this._hoveredGridKey]
+      if (prevIdx !== undefined) {
+        this.gridTileMesh.setColorAt(prevIdx, new THREE.Color(0xffffff))
+        const dummy = new THREE.Object3D()
+        const [pxi, pzi] = this._hoveredGridKey.split(',').map(Number)
+        dummy.position.set(this.gridXPositions[pxi], 0.02, this.gridZPositions[pzi])
+        dummy.rotation.set(-Math.PI / 2, 0, 0)
+        dummy.scale.set(1, 1, 1)
+        dummy.updateMatrix()
+        this.gridTileMesh.setMatrixAt(prevIdx, dummy.matrix)
+        this.gridTileMesh.instanceMatrix.needsUpdate = true
+        this.gridTileMesh.instanceColor.needsUpdate = true
+      }
+      this._hoveredGridKey = null
+    }
+
+    if (this.currentLevel !== Level.OVERVIEW) return
+
+    const hits = raycaster.intersectObject(this.gridTileMesh, false)
+    if (hits.length > 0 && hits[0].instanceId !== undefined) {
+      const hitId = hits[0].instanceId
+      for (const [key, idx] of Object.entries(this.gridTileMap)) {
+        if (idx === hitId) {
+          this._hoveredGridKey = key
+          this.gridTileMesh.setColorAt(idx, new THREE.Color(0x44bbff))
+          const dummy = new THREE.Object3D()
+          const [hxi, hzi] = key.split(',').map(Number)
+          dummy.position.set(this.gridXPositions[hxi], 0.05, this.gridZPositions[hzi])
+          dummy.rotation.set(-Math.PI / 2, 0, 0)
+          dummy.scale.set(1.15, 1.15, 1.15)
+          dummy.updateMatrix()
+          this.gridTileMesh.setMatrixAt(idx, dummy.matrix)
+          this.gridTileMesh.instanceMatrix.needsUpdate = true
+          this.gridTileMesh.instanceColor.needsUpdate = true
+          break
+        }
+      }
+    }
+  }
+
+  _findPath(startX, startZ, endX, endZ) {
+    const snapStart = this._snapToGrid(startX, startZ)
+    const snapEnd = this._snapToGrid(endX, endZ)
+
+    let si = this.gridXPositions.indexOf(snapStart.x)
+    let sj = this.gridZPositions.indexOf(snapStart.z)
+    let ei = this.gridXPositions.indexOf(snapEnd.x)
+    let ej = this.gridZPositions.indexOf(snapEnd.z)
+
+    if (si === -1) si = this.gridXPositions.reduce((best, v, i) => Math.abs(v - snapStart.x) < Math.abs(this.gridXPositions[best] - snapStart.x) ? i : best, 0)
+    if (sj === -1) sj = this.gridZPositions.reduce((best, v, i) => Math.abs(v - snapStart.z) < Math.abs(this.gridZPositions[best] - snapStart.z) ? i : best, 0)
+    if (ei === -1) ei = this.gridXPositions.reduce((best, v, i) => Math.abs(v - snapEnd.x) < Math.abs(this.gridXPositions[best] - snapEnd.x) ? i : best, 0)
+    if (ej === -1) ej = this.gridZPositions.reduce((best, v, i) => Math.abs(v - snapEnd.z) < Math.abs(this.gridZPositions[best] - snapEnd.z) ? i : best, 0)
+
+    if (this.navBlocked.has(`${ei},${ej}`)) return null
+    if (si === ei && sj === ej) return [{ x: snapEnd.x, z: snapEnd.z }]
+
+    const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]]
+    const visited = new Set()
+    const key = (i, j) => `${i},${j}`
+    visited.add(key(si, sj))
+    const queue = [[si, sj, [{ x: this.gridXPositions[si], z: this.gridZPositions[sj] }]]]
+
+    while (queue.length > 0) {
+      const [ci, cj, path] = queue.shift()
+      for (const [di, dj] of dirs) {
+        const ni = ci + di
+        const nj = cj + dj
+        if (ni < 0 || ni >= this.gridXPositions.length || nj < 0 || nj >= this.gridZPositions.length) continue
+        const nk = key(ni, nj)
+        if (visited.has(nk)) continue
+        if (this.navBlocked.has(nk)) continue
+        visited.add(nk)
+        const newPath = [...path, { x: this.gridXPositions[ni], z: this.gridZPositions[nj] }]
+        if (ni === ei && nj === ej) return newPath
+        queue.push([ni, nj, newPath])
+      }
+    }
+
+    return null
   }
 
   _getClickZones() {
@@ -198,6 +412,22 @@ export class LevelManager {
       this.scene.remove(this.floorLabel)
       this.floorLabel = null
     }
+    if (this._hoveredGridKey !== null && this.gridTileMesh) {
+      const prevIdx = this.gridTileMap[this._hoveredGridKey]
+      if (prevIdx !== undefined) {
+        this.gridTileMesh.setColorAt(prevIdx, new THREE.Color(0xffffff))
+        const dummy = new THREE.Object3D()
+        const [pxi, pzi] = this._hoveredGridKey.split(',').map(Number)
+        dummy.position.set(this.gridXPositions[pxi], 0.02, this.gridZPositions[pzi])
+        dummy.rotation.set(-Math.PI / 2, 0, 0)
+        dummy.scale.set(1, 1, 1)
+        dummy.updateMatrix()
+        this.gridTileMesh.setMatrixAt(prevIdx, dummy.matrix)
+        this.gridTileMesh.instanceMatrix.needsUpdate = true
+        this.gridTileMesh.instanceColor.needsUpdate = true
+      }
+      this._hoveredGridKey = null
+    }
     this.hoveredShelfUnit = null
     this.hoveredProduct = null
   }
@@ -210,6 +440,8 @@ export class LevelManager {
   }
 
   _hoverL1(raycaster) {
+    this._updateGridHover(raycaster)
+
     const clickZones = this._getClickZones()
     const hits = raycaster.intersectObjects(clickZones, false)
 
@@ -278,6 +510,10 @@ export class LevelManager {
   }
 
   _hoverL2(raycaster) {
+    if (this._hoveredGridKey !== null) {
+      this._clearHover()
+    }
+
     const instanceMeshes = this._getInstanceMeshes()
     const hits = raycaster.intersectObjects(instanceMeshes, false)
 
@@ -307,7 +543,7 @@ export class LevelManager {
   _hoverL3(raycaster) {
     if (!this.inspectionGroup.visible) return
     const buttons = this.inspectionGroup.children.filter(
-      c => c.name === 'btn-add' || c.name === 'btn-cancel'
+      c => c.name === 'btn-add'
     )
     buttons.forEach(btn => btn.scale.set(1, 1, 1))
     const hits = raycaster.intersectObjects(buttons, false)
@@ -335,7 +571,7 @@ export class LevelManager {
         this.panOffsetX -= delta.x * this.l2PanSpeed
         this.panOffsetX = THREE.MathUtils.clamp(this.panOffsetX, -this.l2PanClamp, this.l2PanClamp)
       }
-      if (this.currentLevel === Level.INSPECT && this.isDraggingProduct && this.selectedProduct) {
+      if (this.currentLevel === Level.INSPECT && this.selectedProduct) {
         this.selectedProduct.rotation.y += delta.x * 0.008
         this.selectedProduct.rotation.x += delta.y * 0.008
       }
@@ -402,11 +638,26 @@ export class LevelManager {
             log.info(MOD, `CHECKOUT: ${this.cart.length} items`, this.cart.map(i => `${i.title} ${i.price}`))
           } else {
             const floorHits = raycaster.intersectObjects(this.scene.children.filter(c => c.name === 'floor'), false)
-            if (floorHits.length > 0) {
-              const point = floorHits[0].point
-              const snapped = this._snapToGrid(point.x, point.z)
-              this.trolleyTarget.set(snapped.x, 0, snapped.z)
-              log.info(MOD, `Trolley target set to grid (${snapped.x.toFixed(1)}, ${snapped.z.toFixed(1)})`)
+            const gridHits = this.gridTileMesh ? raycaster.intersectObject(this.gridTileMesh, false) : []
+            let clickPoint = null
+            if (gridHits.length > 0) {
+              clickPoint = gridHits[0].point
+            } else if (floorHits.length > 0) {
+              clickPoint = floorHits[0].point
+            }
+            if (clickPoint) {
+              const path = this._findPath(
+                this.trolley.position.x, this.trolley.position.z,
+                clickPoint.x, clickPoint.z
+              )
+              if (path && path.length > 0) {
+                this.trolleyPath = path
+                this.trolleyWaypointIndex = 0
+                this.trolleyTarget.set(path[path.length - 1].x, 0, path[path.length - 1].z)
+                log.info(MOD, `Trolley path: ${path.length} waypoints, target grid (${this.trolleyTarget.x.toFixed(1)}, ${this.trolleyTarget.z.toFixed(1)})`)
+              } else {
+                log.debug(MOD, 'No valid path to target')
+              }
             } else {
               log.debug(MOD, 'L1 click — no shelf or floor hit')
             }
@@ -440,7 +691,9 @@ export class LevelManager {
 
           this._selectProduct(standalone)
         } else {
-          log.debug(MOD, `L2 click — no product hit (${hits.length} total hits)`)
+          log.info(MOD, 'L2 click — no product hit, returning to L1')
+          this.panOffsetX = 0
+          this.transitionTo(Level.OVERVIEW)
         }
       } else if (this.currentLevel === Level.INSPECT) {
         if (!this.selectedProduct || this.isDropping) return
@@ -451,13 +704,12 @@ export class LevelManager {
           if (clicked.name === 'btn-add') {
             log.info(MOD, 'L3 btn-add clicked — triggering drop')
             this._triggerDrop()
-          } else if (clicked.name === 'btn-cancel') {
-            log.info(MOD, 'L3 btn-cancel clicked — returning to shelf')
-            this._returnToL2()
           } else {
-            log.debug(MOD, 'L3 click on product — starting drag')
             this.isDraggingProduct = true
           }
+        } else {
+          log.info(MOD, 'L3 click outside product — returning to shelf')
+          this._returnToL2()
         }
       }
     }
@@ -491,10 +743,12 @@ export class LevelManager {
       this.targetLookAt.copy(LEVEL1_LOOKAT)
       this.targetFOV = LEVEL1_FOV
       this.panOffsetX = 0
+      if (this.gridTileMesh) this.gridTileMesh.visible = true
     } else if (level === Level.SIDE_ON) {
       this.panOffsetX = 0
       this._updateL2Targets()
       this.targetFOV = LEVEL2_FOV
+      if (this.gridTileMesh) this.gridTileMesh.visible = false
       log.debug(MOD, `L2 target: pos(${this.targetPos.x.toFixed(1)},${this.targetPos.y.toFixed(1)},${this.targetPos.z.toFixed(1)}) lookAt(${this.targetLookAt.x.toFixed(1)},${this.targetLookAt.y.toFixed(1)},${this.targetLookAt.z.toFixed(1)})`)
     } else if (level === Level.INSPECT) {
     }
@@ -603,7 +857,43 @@ export class LevelManager {
   }
 
   update() {
-    this.trolley.position.lerp(this.trolleyTarget, 0.04)
+    if (this.trolleyPath.length > 0 && this.trolleyWaypointIndex < this.trolleyPath.length) {
+      let remaining = this.trolleySpeed
+
+      while (remaining > 0.001 && this.trolleyWaypointIndex < this.trolleyPath.length) {
+        const wp = this.trolleyPath[this.trolleyWaypointIndex]
+        const dx = wp.x - this.trolley.position.x
+        const dz = wp.z - this.trolley.position.z
+        const dist = Math.sqrt(dx * dx + dz * dz)
+
+        if (dist < 0.001) {
+          this.trolleyWaypointIndex++
+          continue
+        }
+
+        if (dist <= remaining) {
+          this.trolley.position.set(wp.x, 0, wp.z)
+          remaining -= dist
+          this.trolleyWaypointIndex++
+        } else {
+          const ratio = remaining / dist
+          this.trolley.position.x += dx * ratio
+          this.trolley.position.z += dz * ratio
+          remaining = 0
+          this.trolleyTargetAngle = Math.atan2(dx, dz)
+        }
+      }
+
+      if (this.trolleyWaypointIndex >= this.trolleyPath.length) {
+        this.trolleyPath = []
+        this.trolleyWaypointIndex = 0
+      }
+    }
+
+    const angleDiff = this.trolleyTargetAngle - this.trolley.rotation.y
+    let wrapped = ((angleDiff + Math.PI) % (Math.PI * 2)) - Math.PI
+    if (wrapped < -Math.PI) wrapped += Math.PI * 2
+    this.trolley.rotation.y += wrapped * this.trolleyRotationSpeed
 
     if (this.isDropping && this.selectedProduct) {
       this.selectedProduct.position.y -= 0.3
@@ -664,7 +954,7 @@ export class LevelManager {
         if (this.l3AnimPhase === ANIM_PHASE.FORWARD) {
           const dist = this.selectedProduct.position.distanceTo(this.l3IntermediatePos)
           if (dist > ANIM_THRESHOLD) {
-            this.selectedProduct.position.lerp(this.l3IntermediatePos, LERP_SPEED)
+            this.selectedProduct.position.lerp(this.l3IntermediatePos, PRODUCT_LERP_SPEED)
             done = false
             if (this.l3AnimFrameCount <= 30 || this.l3AnimFrameCount % 5 === 0) {
               this._logAnimFrame('FWD→intermediate', this.l3IntermediatePos, dist, 'L3-pull')
@@ -679,7 +969,7 @@ export class LevelManager {
         if (this.l3AnimPhase === ANIM_PHASE.TO_TARGET) {
           const dist = this.selectedProduct.position.distanceTo(this.inspectTargetPos)
           if (dist > ANIM_THRESHOLD) {
-            this.selectedProduct.position.lerp(this.inspectTargetPos, LERP_SPEED)
+            this.selectedProduct.position.lerp(this.inspectTargetPos, PRODUCT_LERP_SPEED)
             done = false
             if (this.l3AnimFrameCount <= 30 || this.l3AnimFrameCount % 5 === 0) {
               this._logAnimFrame('TO_TARGET', this.inspectTargetPos, dist, 'L3-pull')
@@ -704,7 +994,7 @@ export class LevelManager {
         if (this.l3AnimPhase === ANIM_PHASE.FORWARD) {
           const dist = this.selectedProduct.position.distanceTo(this.l3IntermediatePos)
           if (dist > ANIM_THRESHOLD) {
-            this.selectedProduct.position.lerp(this.l3IntermediatePos, LERP_SPEED)
+            this.selectedProduct.position.lerp(this.l3IntermediatePos, PRODUCT_LERP_SPEED)
             done = false
             if (this.l3AnimFrameCount <= 30 || this.l3AnimFrameCount % 5 === 0) {
               this._logAnimFrame('FWD→intermediate', this.l3IntermediatePos, dist, 'L3-return')
@@ -720,7 +1010,7 @@ export class LevelManager {
           const origPos = this.selectedProduct.userData.originalPosition
           const dist = this.selectedProduct.position.distanceTo(origPos)
           if (dist > ANIM_THRESHOLD) {
-            this.selectedProduct.position.lerp(origPos, LERP_SPEED)
+            this.selectedProduct.position.lerp(origPos, PRODUCT_LERP_SPEED)
             done = false
             if (this.l3AnimFrameCount <= 30 || this.l3AnimFrameCount % 5 === 0) {
               this._logAnimFrame('TO_TARGET', origPos, dist, 'L3-return')
@@ -737,8 +1027,8 @@ export class LevelManager {
         const rxDiff = Math.abs(this.selectedProduct.rotation.x - origRot.x)
         const ryDiff = Math.abs(this.selectedProduct.rotation.y - origRot.y)
         if (rxDiff > 0.01 || ryDiff > 0.01) {
-          this.selectedProduct.rotation.x += (origRot.x - this.selectedProduct.rotation.x) * LERP_SPEED
-          this.selectedProduct.rotation.y += (origRot.y - this.selectedProduct.rotation.y) * LERP_SPEED
+          this.selectedProduct.rotation.x += (origRot.x - this.selectedProduct.rotation.x) * PRODUCT_LERP_SPEED
+          this.selectedProduct.rotation.y += (origRot.y - this.selectedProduct.rotation.y) * PRODUCT_LERP_SPEED
           done = false
         } else {
           this.selectedProduct.rotation.x = origRot.x
@@ -778,6 +1068,7 @@ export class LevelManager {
     log.info(MOD, `L2 pan clamp updated to ${this.l2PanClamp.toFixed(1)}`)
 
     this._buildGridPositions()
+    this._repositionCheckout()
 
     log.info(MOD, `References rebuilt — ${this.shelfGroups.length} shelf groups, ${this.gridZPositions.length} grid Z positions`)
   }
@@ -810,6 +1101,22 @@ export class LevelManager {
   _setL2PanClamp(clamp) {
     this.l2PanClamp = clamp
     log.info(MOD, `L2 pan clamp set to ${clamp}`)
+  }
+
+  _setTrolleySpeed(speed) {
+    this.trolleySpeed = speed
+    log.info(MOD, `Trolley speed set to ${speed}`)
+  }
+
+  _setTrolleyRotationSpeed(speed) {
+    this.trolleyRotationSpeed = speed
+    log.info(MOD, `Trolley rotation speed set to ${speed}`)
+  }
+
+  _setGridOpacity(opacity) {
+    if (this.gridTileMesh) {
+      this.gridTileMesh.material.opacity = opacity
+    }
   }
 
   getState() {
@@ -864,20 +1171,6 @@ export class LevelManager {
     addBtn.position.set(0, -0.35, 0.05)
     addBtn.name = 'btn-add'
     group.add(addBtn)
-
-    const cancelBtn = createTextPanel('Back to Shelf', {
-      bgColor: '#c0392b',
-      textColor: '#ffffff',
-      fontSize: 36,
-      width: 384,
-      height: 80,
-      meshWidth: 0.35,
-      meshHeight: 0.1,
-      borderRadius: 12
-    })
-    cancelBtn.position.set(0.35, 0.25, 0.05)
-    cancelBtn.name = 'btn-cancel'
-    group.add(cancelBtn)
 
     group.visible = false
   }
@@ -938,6 +1231,14 @@ export class LevelManager {
 
     log.info(MOD, `Checkout till created at z=${group.position.z.toFixed(1)}`)
     return group
+  }
+
+  _repositionCheckout() {
+    if (!this.checkoutTill) return
+    const numPairs = Math.ceil(shelfConfig.numShelfUnits / 2)
+    const storeEndZ = (numPairs - 1) * shelfConfig.aisleSpacingZ + shelfConfig.shelfDepth / 2
+    this.checkoutTill.position.set(0, 0, storeEndZ + 5)
+    log.info(MOD, `Checkout till repositioned to z=${this.checkoutTill.position.z.toFixed(1)}`)
   }
 
   _triggerDrop() {

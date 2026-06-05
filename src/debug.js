@@ -51,6 +51,9 @@ const settings = {
   l1PanSpeed: 0.01,
   l2PanSpeed: 0.01,
   l2PanClamp: 8,
+  trolleySpeed: 0.25,
+  trolleyRotation: 0.15,
+  gridOpacity: 0.25,
   ambientIntensity: 0.6,
   dirIntensity: 0.8,
   dirPosX: 5,
@@ -232,6 +235,14 @@ export function initDebug(camera, levelManager, scene, dof) {
   levelFolder.add(settings, 'forceL2').name('→ L2 Side-On')
   levelFolder.add(settings, 'forceL3').name('→ L3 Inspect')
 
+  const trolleyFolder = gui.addFolder('Trolley')
+  trolleyFolder.add(settings, 'trolleySpeed', 0.05, 0.5, 0.01).name('Speed').listen().onChange(v => {
+    levelManager._setTrolleySpeed(v)
+  })
+  trolleyFolder.add(settings, 'trolleyRotation', 0.05, 0.4, 0.01).name('Rotation').listen().onChange(v => {
+    levelManager._setTrolleyRotationSpeed(v)
+  })
+
   const ambientLight = scene.children.find(c => c.isAmbientLight)
   const dirLight = scene.children.find(c => c.isDirectionalLight)
   const lightFolder = gui.addFolder('Lighting')
@@ -279,6 +290,9 @@ export function initDebug(camera, levelManager, scene, dof) {
   aisleFolder.add(settings, 'rebuildStore').name('⟳ Rebuild Store')
 
   const debugFolder = gui.addFolder('Debug')
+  debugFolder.add(settings, 'gridOpacity', 0.05, 0.8, 0.05).name('Grid Opacity').listen().onChange(v => {
+    levelManager._setGridOpacity(v)
+  })
   debugFolder.add(settings, 'showStats').name('Stats Panel').onChange(v => {
     stats.dom.style.display = v ? 'block' : 'none'
   })
@@ -337,6 +351,11 @@ export function syncSettings(levelManager, camera) {
   settings.l1PanSpeed = levelManager.l1PanSpeed
   settings.l2PanSpeed = levelManager.l2PanSpeed
   settings.l2PanClamp = levelManager.l2PanClamp
+  settings.trolleySpeed = levelManager.trolleySpeed
+  settings.trolleyRotation = levelManager.trolleyRotationSpeed
+  if (levelManager.gridTileMesh) {
+    settings.gridOpacity = levelManager.gridTileMesh.material.opacity
+  }
   if (dofRef && dofRef.enabled && !dofRef.manualFocus) {
     settings.dofFocus = parseFloat(dofRef.bokehPass.uniforms['focus'].value.toFixed(2))
   }
