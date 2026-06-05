@@ -2,7 +2,7 @@ import * as THREE from 'three'
 import {
   LEVEL1_POS, LEVEL1_LOOKAT, LEVEL1_FOV,
   LEVEL2_POS, LEVEL2_LOOKAT, LEVEL2_FOV,
-  LEVEL3_FOV, LEVEL3_PULL_DISTANCE, lerpFOV,
+  LEVEL3_FOV, LEVEL3_ZOOM_FOV, LEVEL3_PULL_DISTANCE, lerpFOV,
   computeL1PanBounds
 } from './camera.js'
 import {
@@ -12,7 +12,7 @@ import {
   findShelfGroupForHit, getAllInstanceMeshes, sharedBoxGeo, sharedCylGeo
 } from './shelf.js'
 import { createTrolley } from './trolley.js'
-import { showDimmer, hideDimmer, showCloseButton, hideCloseButton } from './ui.js'
+import { hideDimmer, showCloseButton, hideCloseButton } from './ui.js'
 import { log } from './log.js'
 
 const MOD = 'Level'
@@ -60,11 +60,12 @@ function createInstanceOutline(meshType, position, scale) {
 }
 
 export class LevelManager {
-  constructor(camera, aisleSystem, input, scene) {
+  constructor(camera, aisleSystem, input, scene, dof) {
     this.camera = camera
     this.aisleSystem = aisleSystem
     this.input = input
     this.scene = scene
+    this.dof = dof
     this.shelfGroups = getAllShelfGroups(aisleSystem)
 
     this.currentLevel = Level.OVERVIEW
@@ -83,6 +84,9 @@ export class LevelManager {
     this.selectedProduct = null
     this.inspectTargetPos = new THREE.Vector3()
     this.isDraggingProduct = false
+
+    this.l3SavedCameraPos = new THREE.Vector3()
+    this.l3SavedLookAt = new THREE.Vector3()
 
     this._instanceRef = null
 
@@ -172,7 +176,6 @@ export class LevelManager {
     }
     this.hoveredShelfUnit = null
     this.hoveredProduct = null
-    document.body.style.cursor = 'default'
   }
 
   _isOccluded(raycaster, clickZoneHit) {
@@ -219,8 +222,6 @@ export class LevelManager {
         )
         this.scene.add(this.floorLabel)
       }
-
-      document.body.style.cursor = 'pointer'
     } else {
       if (this.hoveredShelfUnit) {
         this._clearHover()
@@ -231,13 +232,24 @@ export class LevelManager {
   _hoverL2(raycaster) {
     const instanceMeshes = this._getInstanceMeshes()
     const hits = raycaster.intersectObjects(instanceMeshes, false)
-    const productHit = hits.find(h => h.instanceId !== undefined && h.object.userData?.isInstancedProducts)
 
-    if (productHit) {
-      const { object, instanceId } = productHit
+    const frontRowHit = hits.find(h => {
+      if (h.instanceId === undefined || !h.object.userData?.isInstancedProducts) return false
+      const shelfGroup = findShelfGroupForHit(h.object)
+      if (!shelfGroup) return false
+      const entry = findProductByInstanceId(shelfGroup, h.object.userData.productType, h.instanceId)
+      if (!entry || entry.isHidden) return false
+      const localZ = entry.originalPosition.z
+      const usableDepth = shelfConfig.shelfDepth - 0.1
+      const rowSpacing = usableDepth / shelfConfig.depthRows
+      const frontRowZ = -usableDepth / 2 + rowSpacing / 2 + (shelfConfig.depthRows - 1) * rowSpacing
+      return localZ >= frontRowZ - rowSpacing * 0.4
+    })
+
+    if (frontRowHit) {
+      const { object, instanceId } = frontRowHit
       const meshType = object.userData.productType
       const shelfGroup = findShelfGroupForHit(object)
-
       if (!shelfGroup) return
 
       const entry = findProductByInstanceId(shelfGroup, meshType, instanceId)
@@ -255,7 +267,6 @@ export class LevelManager {
           this.hoveredProductOutline = outline
         }
       }
-      document.body.style.cursor = 'pointer'
     } else {
       if (this.hoveredProduct) {
         this._clearHover()
@@ -441,7 +452,6 @@ export class LevelManager {
       this.targetFOV = LEVEL2_FOV
       log.debug(MOD, `L2 target: pos(${this.targetPos.x.toFixed(1)},${this.targetPos.y.toFixed(1)},${this.targetPos.z.toFixed(1)}) lookAt(${this.targetLookAt.x.toFixed(1)},${this.targetLookAt.y.toFixed(1)},${this.targetLookAt.z.toFixed(1)})`)
     } else if (level === Level.INSPECT) {
-      this.targetFOV = LEVEL3_FOV
     }
   }
 
@@ -452,17 +462,32 @@ export class LevelManager {
   }
 
   _selectProduct(product) {
+    this._clearHover()
     this.selectedProduct = product
+    this.currentLevel = Level.INSPECT
     this.isTransitioning = true
+
+    this.l3SavedCameraPos.copy(this.camera.position)
+    this.l3SavedLookAt.copy(this.currentLookAt)
 
     const camDir = new THREE.Vector3()
     this.camera.getWorldDirection(camDir)
-    this.inspectTargetPos.copy(this.camera.position).add(camDir.multiplyScalar(LEVEL3_PULL_DISTANCE))
-    this.inspectTargetPos.y = this.camera.position.y - 0.5
 
-    log.info(MOD, `_selectProduct: "${product.userData.id}" → inspect at (${this.inspectTargetPos.x.toFixed(1)},${this.inspectTargetPos.y.toFixed(1)},${this.inspectTargetPos.z.toFixed(1)})`)
+    this.inspectTargetPos.copy(this.camera.position).add(camDir.clone().multiplyScalar(LEVEL3_PULL_DISTANCE))
 
-    showDimmer()
+    this.targetPos.copy(this.camera.position)
+    this.targetLookAt.copy(this.currentLookAt)
+
+    const scale = product.scale.x
+    const baseFOV = scale > 1.0 ? LEVEL3_FOV + (scale - 1.0) * 10 : LEVEL3_FOV
+    this.targetFOV = THREE.MathUtils.clamp(baseFOV, LEVEL3_ZOOM_FOV, LEVEL3_FOV)
+
+    const startWorldPos = product.position.clone()
+    const focusDist = this.camera.position.distanceTo(this.inspectTargetPos)
+
+    log.info(MOD, `_selectProduct: scale=${scale.toFixed(2)} start=(${startWorldPos.x.toFixed(2)},${startWorldPos.y.toFixed(2)},${startWorldPos.z.toFixed(2)}) target=(${this.inspectTargetPos.x.toFixed(2)},${this.inspectTargetPos.y.toFixed(2)},${this.inspectTargetPos.z.toFixed(2)}) focusDist=${focusDist.toFixed(2)} FOV=${this.targetFOV.toFixed(1)}`)
+
+    this.dof.enable(focusDist)
     showCloseButton(() => this._returnToL2())
   }
 
@@ -470,18 +495,21 @@ export class LevelManager {
     if (!this.selectedProduct) return
     this.isTransitioning = true
     this.currentLevel = Level.SIDE_ON
-    log.info(MOD, '_returnToL2 — returning product and camera')
+    log.info(MOD, '_returnToL2 — returning product and zooming out')
 
     if (this._instanceRef) {
-      const origPos = this._instanceRef.entry.originalPosition
-      this.selectedProduct.userData.originalPosition = origPos.clone()
+      const shelfGroup = this._instanceRef.shelfGroup
+      const localPos = this._instanceRef.entry.originalPosition.clone()
+      const worldPos = shelfGroup.localToWorld(localPos)
+      this.selectedProduct.userData.originalPosition = worldPos
       this.selectedProduct.userData.originalRotation = this._instanceRef.entry.originalRotation.clone()
     }
 
-    this._updateL2Targets()
+    this.targetPos.copy(this.l3SavedCameraPos)
+    this.targetLookAt.copy(this.l3SavedLookAt)
     this.targetFOV = LEVEL2_FOV
 
-    hideDimmer()
+    this.dof.disable()
     hideCloseButton()
     this.isDraggingProduct = false
   }
@@ -532,11 +560,23 @@ export class LevelManager {
 
       if (this.selectedProduct && this.currentLevel === Level.INSPECT) {
         const prodDist = this.selectedProduct.position.distanceTo(this.inspectTargetPos)
+        const focusDist = this.camera.position.distanceTo(this.selectedProduct.position)
+        this.dof.updateFocus(focusDist)
         if (prodDist > 0.02) {
           this.selectedProduct.position.lerp(this.inspectTargetPos, LERP_SPEED)
           done = false
+          if (this._l3FrameCount === undefined) this._l3FrameCount = 0
+          this._l3FrameCount++
+          if (this._l3FrameCount % 15 === 1) {
+            const p = this.selectedProduct.position
+            log.debug(MOD, `L3 product lerp #${this._l3FrameCount}: pos=(${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)}) dist=${prodDist.toFixed(3)} fov=${this.camera.fov.toFixed(1)}`)
+          }
         } else {
           this.selectedProduct.position.copy(this.inspectTargetPos)
+          if (this._l3FrameCount !== undefined) {
+            log.debug(MOD, `L3 product arrived after ${this._l3FrameCount} frames at (${this.inspectTargetPos.x.toFixed(2)},${this.inspectTargetPos.y.toFixed(2)},${this.inspectTargetPos.z.toFixed(2)})`)
+            this._l3FrameCount = undefined
+          }
         }
       }
 
@@ -585,6 +625,9 @@ export class LevelManager {
     this.aisleSystem = newAisleSystem
     this.shelfGroups = getAllShelfGroups(newAisleSystem)
     this.panBounds = computeL1PanBounds()
+
+    this.l2PanClamp = shelfConfig.shelfWidth / 2 + 1
+    log.info(MOD, `L2 pan clamp updated to ${this.l2PanClamp.toFixed(1)}`)
 
     this._buildGridPositions()
 

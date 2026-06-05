@@ -12,7 +12,11 @@ canvas {
   display: block;
   width: 100vw;
   height: 100vh;
-  cursor: default;
+  cursor: grab;
+}
+
+body.dragging canvas {
+  cursor: grabbing !important;
 }
 
 #dimmer {

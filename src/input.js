@@ -65,6 +65,7 @@ export class InputManager {
 
     if (!this.isDragging && (Math.abs(dx) > this.dragThreshold || Math.abs(dy) > this.dragThreshold)) {
       this.isDragging = true
+      document.body.classList.add('dragging')
       log.debug(MOD, 'Drag started')
       if (this.onDragStart) {
         this._updateMouse(event)
@@ -92,6 +93,7 @@ export class InputManager {
     this.raycaster.setFromCamera(this.mouse, this.camera)
 
     if (this.isDragging) {
+      document.body.classList.remove('dragging')
       log.debug(MOD, 'Drag ended')
       if (this.onDragEnd) this.onDragEnd()
     } else {

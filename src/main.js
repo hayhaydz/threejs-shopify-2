@@ -6,6 +6,7 @@ import { LevelManager } from './levels.js'
 import { InputManager } from './input.js'
 import { log } from './log.js'
 import { initDebug, beginFrame, endFrame, syncSettings } from './debug.js'
+import { DOFManager } from './dof.js'
 
 const MOD = 'Main'
 
@@ -16,14 +17,17 @@ const camera = createCamera()
 const aisleSystem = createAisleSystem()
 scene.add(aisleSystem)
 
+const dof = new DOFManager(renderer, scene, camera)
+
 const input = new InputManager(camera, renderer.domElement)
-const levelManager = new LevelManager(camera, aisleSystem, input, scene)
+const levelManager = new LevelManager(camera, aisleSystem, input, scene, dof)
 
 initDebug(camera, levelManager, scene)
 
 window.addEventListener('resize', () => {
   updateCameraAspect(camera)
   renderer.setSize(window.innerWidth, window.innerHeight)
+  dof.resize()
   log.debug(MOD, `Resize: ${window.innerWidth}x${window.innerHeight}`)
 })
 
@@ -31,7 +35,12 @@ function animate() {
   requestAnimationFrame(animate)
   beginFrame()
   levelManager.update()
-  renderer.render(scene, camera)
+  if (dof.enabled) {
+    dof.updateCamera(camera)
+    dof.render()
+  } else {
+    renderer.render(scene, camera)
+  }
   syncSettings(levelManager, camera)
   endFrame()
 }
