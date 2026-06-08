@@ -6,7 +6,7 @@ import {
   computeL1PanBounds
 } from './camera.js'
 import {
-  getAllShelfGroups, shelfConfig,
+  getAllShelfGroups, shelfConfig, getAisleSpacingZ,
   hideInstance, showInstance, spawnStandaloneMesh,
   getWorldPositionFromInstance, findProductByInstanceId,
   findShelfGroupForHit, getAllInstanceMeshes, sharedBoxGeo, sharedCylGeo,
@@ -24,6 +24,8 @@ const LEVEL_NAMES = { 1: 'OVERVIEW', 2: 'SIDE_ON', 3: 'INSPECT' }
 
 const ANIM_PHASE = { NONE: 0, FORWARD: 1, TO_TARGET: 2 }
 const ANIM_THRESHOLD = 0.015
+
+const CellType = { EMPTY: 0, WALKABLE: 1, SHELF: 2, CHECKOUT: 3 }
 
 let LERP_SPEED = 0.05
 let PRODUCT_LERP_SPEED = 0.12
@@ -108,9 +110,15 @@ export class LevelManager {
     this.selectedProduct = null
     this.inspectTargetPos = new THREE.Vector3()
     this.isDraggingProduct = false
+    this.rotVelX = 0
+    this.rotVelY = 0
+    this.rotDamping = 0.95
 
     this.l3SavedCameraPos = new THREE.Vector3()
     this.l3SavedLookAt = new THREE.Vector3()
+
+    this.l1SavedCameraPos = LEVEL1_POS.clone()
+    this.l1SavedLookAt = LEVEL1_LOOKAT.clone()
 
     this._instanceRef = null
 
@@ -127,11 +135,16 @@ export class LevelManager {
     this.panGrabPoint = new THREE.Vector3()
     this.panLookAtStart = new THREE.Vector3()
     this.panCameraStart = new THREE.Vector3()
+    this.l1PanVelocity = new THREE.Vector3()
+    this.l1PanDamping = 0.92
+    this.l1PanVelocityThreshold = 0.001
 
     this.panBounds = computeL1PanBounds()
     this.l1PanSpeed = 0.01
     this.l2PanSpeed = 0.01
     this.l2PanClamp = 8
+    this.l2PanVelocity = 0
+    this.l2PanDamping = 0.92
 
     this.hoveredPlane = null
     this.hoveredShelfUnit = null
@@ -139,10 +152,9 @@ export class LevelManager {
     this.hoveredProduct = null
     this.floorLabel = null
 
-    this._buildGridPositions()
-
     this.trolley = createTrolley()
-    this.trolleyTarget = new THREE.Vector3(0, 0, this.gridZPositions[1])
+    this._buildGridPositions()
+    this.trolleyTarget = new THREE.Vector3(0, 0, this.gridOriginZ + 1 * shelfConfig.cellSize)
     this.trolley.position.copy(this.trolleyTarget)
     this.trolleyPath = []
     this.trolleyWaypointIndex = 0
@@ -169,40 +181,59 @@ export class LevelManager {
   }
 
   _buildGridPositions() {
-    this.gridXPositions = []
-    const gridStep = 1
-    const halfWidth = shelfConfig.shelfWidth / 2
-    for (let x = -halfWidth; x <= halfWidth; x += gridStep) {
-      this.gridXPositions.push(parseFloat(x.toFixed(1)))
-    }
-    const sideLaneOffset = shelfConfig.shelfWidth / 2 + 1
-    this.gridXPositions.push(-sideLaneOffset)
-    this.gridXPositions.push(sideLaneOffset)
-    this.gridXPositions.sort((a, b) => a - b)
+    const { cellSize, shelfWidth, numShelfUnits, shelfDepth } = shelfConfig
+    const aisleSpacingZ = getAisleSpacingZ()
+    const numPairs = Math.ceil(numShelfUnits / 2)
 
-    const numPairs = Math.ceil(shelfConfig.numShelfUnits / 2)
-    this.gridZPositions = [-1]
-    for (let p = 0; p < numPairs; p++) {
-      const pairZ = p * shelfConfig.aisleSpacingZ
-      this.gridZPositions.push(parseFloat(pairZ.toFixed(1)))
-      if (p < numPairs - 1) {
-        const walkwayZ = pairZ + shelfConfig.shelfDepth / 2 + shelfConfig.aisleGap / 2
-        this.gridZPositions.push(parseFloat(walkwayZ.toFixed(1)))
-      }
+    this.gridOriginX = -(shelfWidth / 2 + cellSize)
+    this.gridOriginZ = -cellSize
+
+    const storeEndZ = (numPairs - 1) * aisleSpacingZ + shelfDepth / 2 + shelfConfig.aisleGap
+    this.gridCols = Math.round((shelfWidth + 2 * cellSize) / cellSize) + 1
+    this.gridRows = Math.round((storeEndZ + 2 * cellSize) / cellSize) + 1
+
+    this.grid = []
+    for (let row = 0; row < this.gridRows; row++) {
+      this.grid[row] = new Array(this.gridCols).fill(CellType.EMPTY)
     }
-    const lastZ = (numPairs - 1) * shelfConfig.aisleSpacingZ + shelfConfig.shelfDepth / 2 + shelfConfig.aisleGap
-    this.gridZPositions.push(parseFloat(lastZ.toFixed(1)))
 
     this._buildShelfBounds()
+    this._populateGrid()
     this._buildNavGrid()
     this._buildGridTiles()
+  }
+
+  _populateGrid() {
+    const { cellSize } = shelfConfig
+    const aisleSpacingZ = getAisleSpacingZ()
+    const numPairs = Math.ceil(shelfConfig.numShelfUnits / 2)
+    const storeEndZ = (numPairs - 1) * aisleSpacingZ + shelfConfig.shelfDepth / 2 + shelfConfig.aisleGap
+    const checkoutZ = storeEndZ + 5
+    const checkoutRow = Math.round((checkoutZ - this.gridOriginZ) / cellSize)
+
+    for (let row = 0; row < this.gridRows; row++) {
+      for (let col = 0; col < this.gridCols; col++) {
+        const worldX = this.gridOriginX + col * cellSize
+        const worldZ = this.gridOriginZ + row * cellSize
+
+        if (this._isInsideShelf(worldX, worldZ)) {
+          this.grid[row][col] = CellType.SHELF
+        } else if (Math.abs(worldX) <= 2 && row === checkoutRow) {
+          this.grid[row][col] = CellType.CHECKOUT
+        } else if (worldX >= this.gridOriginX && worldX <= this.gridOriginX + (this.gridCols - 1) * cellSize &&
+                   worldZ >= this.gridOriginZ && worldZ <= this.gridOriginZ + (this.gridRows - 1) * cellSize) {
+          this.grid[row][col] = CellType.WALKABLE
+        }
+      }
+    }
   }
 
   _buildShelfBounds() {
     this.shelfBounds = []
     const numPairs = Math.ceil(shelfConfig.numShelfUnits / 2)
+    const aisleSpacingZ = getAisleSpacingZ()
     for (let p = 0; p < numPairs; p++) {
-      const pairZ = p * shelfConfig.aisleSpacingZ
+      const pairZ = p * aisleSpacingZ
       this.shelfBounds.push({
         xMin: -shelfConfig.shelfWidth / 2,
         xMax: shelfConfig.shelfWidth / 2,
@@ -227,10 +258,10 @@ export class LevelManager {
 
   _buildNavGrid() {
     this.navBlocked = new Set()
-    for (let zi = 0; zi < this.gridZPositions.length; zi++) {
-      for (let xi = 0; xi < this.gridXPositions.length; xi++) {
-        if (this._isInsideShelf(this.gridXPositions[xi], this.gridZPositions[zi])) {
-          this.navBlocked.add(`${xi},${zi}`)
+    for (let row = 0; row < this.gridRows; row++) {
+      for (let col = 0; col < this.gridCols; col++) {
+        if (this.grid[row][col] !== CellType.WALKABLE) {
+          this.navBlocked.add(`${col},${row}`)
         }
       }
     }
@@ -244,8 +275,8 @@ export class LevelManager {
       if (this.gridTileMesh.material.map) this.gridTileMesh.material.map.dispose()
     }
 
-    const tileSize = 1.0
-    const geo = new THREE.PlaneGeometry(tileSize, tileSize)
+    const { cellSize } = shelfConfig
+    const geo = new THREE.PlaneGeometry(cellSize, cellSize)
     const mat = new THREE.MeshBasicMaterial({
       transparent: true,
       opacity: 0.25,
@@ -255,9 +286,9 @@ export class LevelManager {
     })
 
     let count = 0
-    for (let zi = 0; zi < this.gridZPositions.length; zi++) {
-      for (let xi = 0; xi < this.gridXPositions.length; xi++) {
-        if (!this.navBlocked.has(`${xi},${zi}`)) count++
+    for (let row = 0; row < this.gridRows; row++) {
+      for (let col = 0; col < this.gridCols; col++) {
+        if (this.grid[row][col] === CellType.WALKABLE) count++
       }
     }
 
@@ -269,17 +300,18 @@ export class LevelManager {
     let idx = 0
     this.gridTileMap = {}
 
-    for (let zi = 0; zi < this.gridZPositions.length; zi++) {
-      for (let xi = 0; xi < this.gridXPositions.length; xi++) {
-        const key = `${xi},${zi}`
-        if (this.navBlocked.has(key)) continue
-        dummy.position.set(this.gridXPositions[xi], 0.02, this.gridZPositions[zi])
+    for (let row = 0; row < this.gridRows; row++) {
+      for (let col = 0; col < this.gridCols; col++) {
+        if (this.grid[row][col] !== CellType.WALKABLE) continue
+        const worldX = this.gridOriginX + col * cellSize
+        const worldZ = this.gridOriginZ + row * cellSize
+        dummy.position.set(worldX, 0.02, worldZ)
         dummy.rotation.set(-Math.PI / 2, 0, 0)
         dummy.scale.set(1, 1, 1)
         dummy.updateMatrix()
         this.gridTileMesh.setMatrixAt(idx, dummy.matrix)
         this.gridTileMesh.setColorAt(idx, baseColor)
-        this.gridTileMap[key] = idx
+        this.gridTileMap[`${col},${row}`] = idx
         idx++
       }
     }
@@ -294,14 +326,15 @@ export class LevelManager {
 
   _updateGridHover(raycaster) {
     if (!this.gridTileMesh) return
+    const { cellSize } = shelfConfig
 
     if (this._hoveredGridKey !== null) {
       const prevIdx = this.gridTileMap[this._hoveredGridKey]
       if (prevIdx !== undefined) {
         this.gridTileMesh.setColorAt(prevIdx, new THREE.Color(0xffffff))
         const dummy = new THREE.Object3D()
-        const [pxi, pzi] = this._hoveredGridKey.split(',').map(Number)
-        dummy.position.set(this.gridXPositions[pxi], 0.02, this.gridZPositions[pzi])
+        const [pcol, prow] = this._hoveredGridKey.split(',').map(Number)
+        dummy.position.set(this.gridOriginX + pcol * cellSize, 0.02, this.gridOriginZ + prow * cellSize)
         dummy.rotation.set(-Math.PI / 2, 0, 0)
         dummy.scale.set(1, 1, 1)
         dummy.updateMatrix()
@@ -322,8 +355,8 @@ export class LevelManager {
           this._hoveredGridKey = key
           this.gridTileMesh.setColorAt(idx, new THREE.Color(0x44bbff))
           const dummy = new THREE.Object3D()
-          const [hxi, hzi] = key.split(',').map(Number)
-          dummy.position.set(this.gridXPositions[hxi], 0.05, this.gridZPositions[hzi])
+          const [hcol, hrow] = key.split(',').map(Number)
+          dummy.position.set(this.gridOriginX + hcol * cellSize, 0.05, this.gridOriginZ + hrow * cellSize)
           dummy.rotation.set(-Math.PI / 2, 0, 0)
           dummy.scale.set(1.15, 1.15, 1.15)
           dummy.updateMatrix()
@@ -337,18 +370,14 @@ export class LevelManager {
   }
 
   _findPath(startX, startZ, endX, endZ) {
+    const { cellSize } = shelfConfig
     const snapStart = this._snapToGrid(startX, startZ)
     const snapEnd = this._snapToGrid(endX, endZ)
 
-    let si = this.gridXPositions.indexOf(snapStart.x)
-    let sj = this.gridZPositions.indexOf(snapStart.z)
-    let ei = this.gridXPositions.indexOf(snapEnd.x)
-    let ej = this.gridZPositions.indexOf(snapEnd.z)
-
-    if (si === -1) si = this.gridXPositions.reduce((best, v, i) => Math.abs(v - snapStart.x) < Math.abs(this.gridXPositions[best] - snapStart.x) ? i : best, 0)
-    if (sj === -1) sj = this.gridZPositions.reduce((best, v, i) => Math.abs(v - snapStart.z) < Math.abs(this.gridZPositions[best] - snapStart.z) ? i : best, 0)
-    if (ei === -1) ei = this.gridXPositions.reduce((best, v, i) => Math.abs(v - snapEnd.x) < Math.abs(this.gridXPositions[best] - snapEnd.x) ? i : best, 0)
-    if (ej === -1) ej = this.gridZPositions.reduce((best, v, i) => Math.abs(v - snapEnd.z) < Math.abs(this.gridZPositions[best] - snapEnd.z) ? i : best, 0)
+    const si = snapStart.col
+    const sj = snapStart.row
+    const ei = snapEnd.col
+    const ej = snapEnd.row
 
     if (this.navBlocked.has(`${ei},${ej}`)) return null
     if (si === ei && sj === ej) return [{ x: snapEnd.x, z: snapEnd.z }]
@@ -357,19 +386,19 @@ export class LevelManager {
     const visited = new Set()
     const key = (i, j) => `${i},${j}`
     visited.add(key(si, sj))
-    const queue = [[si, sj, [{ x: this.gridXPositions[si], z: this.gridZPositions[sj] }]]]
+    const queue = [[si, sj, [{ x: this.gridOriginX + si * cellSize, z: this.gridOriginZ + sj * cellSize }]]]
 
     while (queue.length > 0) {
       const [ci, cj, path] = queue.shift()
       for (const [di, dj] of dirs) {
         const ni = ci + di
         const nj = cj + dj
-        if (ni < 0 || ni >= this.gridXPositions.length || nj < 0 || nj >= this.gridZPositions.length) continue
+        if (ni < 0 || ni >= this.gridCols || nj < 0 || nj >= this.gridRows) continue
         const nk = key(ni, nj)
         if (visited.has(nk)) continue
         if (this.navBlocked.has(nk)) continue
         visited.add(nk)
-        const newPath = [...path, { x: this.gridXPositions[ni], z: this.gridZPositions[nj] }]
+        const newPath = [...path, { x: this.gridOriginX + ni * cellSize, z: this.gridOriginZ + nj * cellSize }]
         if (ni === ei && nj === ej) return newPath
         queue.push([ni, nj, newPath])
       }
@@ -416,9 +445,10 @@ export class LevelManager {
       const prevIdx = this.gridTileMap[this._hoveredGridKey]
       if (prevIdx !== undefined) {
         this.gridTileMesh.setColorAt(prevIdx, new THREE.Color(0xffffff))
+        const { cellSize } = shelfConfig
         const dummy = new THREE.Object3D()
-        const [pxi, pzi] = this._hoveredGridKey.split(',').map(Number)
-        dummy.position.set(this.gridXPositions[pxi], 0.02, this.gridZPositions[pzi])
+        const [pcol, prow] = this._hoveredGridKey.split(',').map(Number)
+        dummy.position.set(this.gridOriginX + pcol * cellSize, 0.02, this.gridOriginZ + prow * cellSize)
         dummy.rotation.set(-Math.PI / 2, 0, 0)
         dummy.scale.set(1, 1, 1)
         dummy.updateMatrix()
@@ -568,12 +598,15 @@ export class LevelManager {
 
     this.input.onDragMove = (delta, isDragging, raycaster, mouse) => {
       if (this.currentLevel === Level.SIDE_ON && !this.isTransitioning) {
-        this.panOffsetX -= delta.x * this.l2PanSpeed
+        this.l2PanVelocity = -delta.x * this.l2PanSpeed
+        this.panOffsetX += this.l2PanVelocity
         this.panOffsetX = THREE.MathUtils.clamp(this.panOffsetX, -this.l2PanClamp, this.l2PanClamp)
       }
       if (this.currentLevel === Level.INSPECT && this.selectedProduct) {
-        this.selectedProduct.rotation.y += delta.x * 0.008
-        this.selectedProduct.rotation.x += delta.y * 0.008
+        this.rotVelY = delta.x * 0.008
+        this.rotVelX = delta.y * 0.008
+        this.selectedProduct.rotation.y += this.rotVelY
+        this.selectedProduct.rotation.x += this.rotVelX
       }
       if (this.currentLevel === Level.OVERVIEW && this.isPanning && this.frozenCamera) {
         const frozenRaycaster = new THREE.Raycaster()
@@ -584,6 +617,7 @@ export class LevelManager {
           const newLookAt = this.panLookAtStart.clone().add(worldDelta)
           newLookAt.x = THREE.MathUtils.clamp(newLookAt.x, this.panBounds.minX, this.panBounds.maxX)
           newLookAt.z = THREE.MathUtils.clamp(newLookAt.z, this.panBounds.minZ, this.panBounds.maxZ)
+          this.l1PanVelocity.subVectors(newLookAt, this.currentLookAt)
           this.camera.position.copy(newLookAt).add(this.l1CameraOffset)
           this.currentLookAt.copy(newLookAt)
           this.camera.lookAt(this.currentLookAt)
@@ -592,7 +626,7 @@ export class LevelManager {
     }
 
     this.input.onDragEnd = () => {
-      this.isDraggingProduct = false
+    this.isDraggingProduct = false
       if (this.isPanning) {
         this.isPanning = false
         if (this.frozenCamera) {
@@ -627,10 +661,12 @@ export class LevelManager {
         const clickZones = this._getClickZones()
         const hits = raycaster.intersectObjects(clickZones, false)
         if (hits.length > 0) {
+          const hitPoint = hits[0].point
           const shelfUnitIndex = hits[0].object.userData.shelfUnitIndex
           const pairIndex = Math.floor(shelfUnitIndex / 2)
-          this.activeAisleZ = pairIndex * shelfConfig.aisleSpacingZ
-          log.info(MOD, `L1→L2: clicked shelf unit ${shelfUnitIndex} (pair ${pairIndex}) at z=${this.activeAisleZ.toFixed(1)}`)
+          this.activeAisleZ = pairIndex * getAisleSpacingZ()
+          this.panOffsetX = THREE.MathUtils.clamp(hitPoint.x, -this.l2PanClamp, this.l2PanClamp)
+          log.info(MOD, `L1→L2: clicked shelf unit ${shelfUnitIndex} (pair ${pairIndex}) at z=${this.activeAisleZ.toFixed(1)} offsetX=${this.panOffsetX.toFixed(1)}`)
           this.transitionTo(Level.SIDE_ON)
         } else {
           const tillHits = raycaster.intersectObjects(this.checkoutTill.children, true)
@@ -692,7 +728,7 @@ export class LevelManager {
           this._selectProduct(standalone)
         } else {
           log.info(MOD, 'L2 click — no product hit, returning to L1')
-          this.panOffsetX = 0
+          this.l2PanVelocity = 0
           this.transitionTo(Level.OVERVIEW)
         }
       } else if (this.currentLevel === Level.INSPECT) {
@@ -721,7 +757,7 @@ export class LevelManager {
         this._returnToL2()
       } else if (this.currentLevel === Level.SIDE_ON) {
         log.info(MOD, 'Escape — L2→L1')
-        this.panOffsetX = 0
+        this.l2PanVelocity = 0
         this.transitionTo(Level.OVERVIEW)
       }
     }
@@ -739,13 +775,15 @@ export class LevelManager {
     this._clearInspectionGroup()
 
     if (level === Level.OVERVIEW) {
-      this.targetPos.copy(LEVEL1_POS)
-      this.targetLookAt.copy(LEVEL1_LOOKAT)
+      this.targetPos.copy(this.l1SavedCameraPos)
+      this.targetLookAt.copy(this.l1SavedLookAt)
       this.targetFOV = LEVEL1_FOV
-      this.panOffsetX = 0
       if (this.gridTileMesh) this.gridTileMesh.visible = true
     } else if (level === Level.SIDE_ON) {
-      this.panOffsetX = 0
+      this.l1SavedCameraPos.copy(this.camera.position)
+      this.l1SavedLookAt.copy(this.currentLookAt)
+      this.l1PanVelocity.set(0, 0, 0)
+      this.l2PanVelocity = 0
       this._updateL2Targets()
       this.targetFOV = LEVEL2_FOV
       if (this.gridTileMesh) this.gridTileMesh.visible = false
@@ -766,6 +804,8 @@ export class LevelManager {
     this.currentLevel = Level.INSPECT
     this.isTransitioning = true
     this.l3Returning = false
+    this.rotVelX = 0
+    this.rotVelY = 0
 
     this.l3SavedCameraPos.copy(this.camera.position)
     this.l3SavedLookAt.copy(this.currentLookAt)
@@ -831,6 +871,8 @@ export class LevelManager {
 
     this.dof.disable()
     this.isDraggingProduct = false
+    this.rotVelX = 0
+    this.rotVelY = 0
   }
 
   _cleanupStandalone() {
@@ -919,11 +961,44 @@ export class LevelManager {
       }
     }
 
+    if (this.currentLevel === Level.OVERVIEW && !this.isPanning && !this.isTransitioning) {
+      if (this.l1PanVelocity.length() > this.l1PanVelocityThreshold) {
+        const newLookAt = this.currentLookAt.clone().add(this.l1PanVelocity)
+        newLookAt.x = THREE.MathUtils.clamp(newLookAt.x, this.panBounds.minX, this.panBounds.maxX)
+        newLookAt.z = THREE.MathUtils.clamp(newLookAt.z, this.panBounds.minZ, this.panBounds.maxZ)
+        this.camera.position.copy(newLookAt).add(this.l1CameraOffset)
+        this.currentLookAt.copy(newLookAt)
+        this.camera.lookAt(this.currentLookAt)
+        this.l1PanVelocity.multiplyScalar(this.l1PanDamping)
+      } else {
+        this.l1PanVelocity.set(0, 0, 0)
+      }
+    }
+
     if (this.currentLevel === Level.SIDE_ON && !this.isTransitioning) {
+      if (Math.abs(this.l2PanVelocity) > 0.0001) {
+        this.panOffsetX += this.l2PanVelocity
+        this.panOffsetX = THREE.MathUtils.clamp(this.panOffsetX, -this.l2PanClamp, this.l2PanClamp)
+        this.l2PanVelocity *= this.l2PanDamping
+      } else {
+        this.l2PanVelocity = 0
+      }
       this._updateL2Targets()
       this.camera.position.lerp(this.targetPos, 0.08)
       this.currentLookAt.lerp(this.targetLookAt, 0.08)
       this.camera.lookAt(this.currentLookAt)
+    }
+
+    if (this.currentLevel === Level.INSPECT && !this.isDraggingProduct && this.selectedProduct && !this.isTransitioning && !this.isDropping) {
+      if (Math.abs(this.rotVelY) > 0.0001 || Math.abs(this.rotVelX) > 0.0001) {
+        this.selectedProduct.rotation.y += this.rotVelY
+        this.selectedProduct.rotation.x += this.rotVelX
+        this.rotVelY *= this.rotDamping
+        this.rotVelX *= this.rotDamping
+      } else {
+        this.rotVelY = 0
+        this.rotVelX = 0
+      }
     }
 
     if (this.isTransitioning) {
@@ -1070,17 +1145,21 @@ export class LevelManager {
     this._buildGridPositions()
     this._repositionCheckout()
 
-    log.info(MOD, `References rebuilt — ${this.shelfGroups.length} shelf groups, ${this.gridZPositions.length} grid Z positions`)
+    log.info(MOD, `References rebuilt — ${this.shelfGroups.length} shelf groups, ${this.gridCols}x${this.gridRows} grid`)
   }
 
   _snapToGrid(x, z) {
-    const nearestX = this.gridXPositions.reduce((prev, curr) =>
-      Math.abs(curr - x) < Math.abs(prev - x) ? curr : prev
-    )
-    const nearestZ = this.gridZPositions.reduce((prev, curr) =>
-      Math.abs(curr - z) < Math.abs(prev - z) ? curr : prev
-    )
-    return { x: nearestX, z: nearestZ }
+    const { cellSize } = shelfConfig
+    const col = Math.round((x - this.gridOriginX) / cellSize)
+    const row = Math.round((z - this.gridOriginZ) / cellSize)
+    const clampedCol = Math.max(0, Math.min(col, this.gridCols - 1))
+    const clampedRow = Math.max(0, Math.min(row, this.gridRows - 1))
+    return {
+      x: this.gridOriginX + clampedCol * cellSize,
+      z: this.gridOriginZ + clampedRow * cellSize,
+      col: clampedCol,
+      row: clampedRow
+    }
   }
 
   _setLerpSpeed(speed) {
@@ -1101,6 +1180,21 @@ export class LevelManager {
   _setL2PanClamp(clamp) {
     this.l2PanClamp = clamp
     log.info(MOD, `L2 pan clamp set to ${clamp}`)
+  }
+
+  _setL1PanDamping(damping) {
+    this.l1PanDamping = damping
+    log.info(MOD, `L1 pan damping set to ${damping}`)
+  }
+
+  _setL2PanDamping(damping) {
+    this.l2PanDamping = damping
+    log.info(MOD, `L2 pan damping set to ${damping}`)
+  }
+
+  _setRotDamping(damping) {
+    this.rotDamping = damping
+    log.info(MOD, `Rotation damping set to ${damping}`)
   }
 
   _setTrolleySpeed(speed) {
@@ -1226,7 +1320,8 @@ export class LevelManager {
     group.add(this.checkoutSign)
 
     const numPairs = Math.ceil(shelfConfig.numShelfUnits / 2)
-    const storeEndZ = (numPairs - 1) * shelfConfig.aisleSpacingZ + shelfConfig.shelfDepth / 2
+    const aisleSpacingZ = getAisleSpacingZ()
+    const storeEndZ = (numPairs - 1) * aisleSpacingZ + shelfConfig.shelfDepth / 2
     group.position.set(0, 0, storeEndZ + 5)
 
     log.info(MOD, `Checkout till created at z=${group.position.z.toFixed(1)}`)
@@ -1236,7 +1331,8 @@ export class LevelManager {
   _repositionCheckout() {
     if (!this.checkoutTill) return
     const numPairs = Math.ceil(shelfConfig.numShelfUnits / 2)
-    const storeEndZ = (numPairs - 1) * shelfConfig.aisleSpacingZ + shelfConfig.shelfDepth / 2
+    const aisleSpacingZ = getAisleSpacingZ()
+    const storeEndZ = (numPairs - 1) * aisleSpacingZ + shelfConfig.shelfDepth / 2
     this.checkoutTill.position.set(0, 0, storeEndZ + 5)
     log.info(MOD, `Checkout till repositioned to z=${this.checkoutTill.position.z.toFixed(1)}`)
   }

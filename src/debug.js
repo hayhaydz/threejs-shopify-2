@@ -2,7 +2,7 @@ import Stats from 'stats.js'
 import GUI from 'lil-gui'
 import * as THREE from 'three'
 import { log } from './log.js'
-import { shelfConfig, rebuildAisleSystem, getStoreStats, getAllProducts, getWorldPositionFromInstance, hideInstance, spawnStandaloneMesh } from './shelf.js'
+import { shelfConfig, getAisleSpacingZ, rebuildAisleSystem, getStoreStats, getAllProducts, getWorldPositionFromInstance, hideInstance, spawnStandaloneMesh } from './shelf.js'
 import { DOF_ENABLED_DEFAULTS } from './dof.js'
 
 const MOD = 'Debug'
@@ -51,6 +51,9 @@ const settings = {
   l1PanSpeed: 0.01,
   l2PanSpeed: 0.01,
   l2PanClamp: 8,
+  l1PanDamping: 0.92,
+  l2PanDamping: 0.92,
+  rotDamping: 0.95,
   trolleySpeed: 0.25,
   trolleyRotation: 0.15,
   gridOpacity: 0.25,
@@ -86,7 +89,7 @@ function updateReadouts(stats) {
   readouts.products = stats.products
   readouts.hiddenShelves = stats.hiddenShelves
   readouts.storeWidth = shelfConfig.shelfWidth
-  readouts.storeDepth = parseFloat((Math.ceil(shelfConfig.numShelfUnits / 2) * shelfConfig.aisleSpacingZ + shelfConfig.shelfDepth * 2 + shelfConfig.aisleGap).toFixed(1))
+  readouts.storeDepth = parseFloat((Math.ceil(shelfConfig.numShelfUnits / 2) * getAisleSpacingZ() + shelfConfig.shelfDepth * 2 + shelfConfig.aisleGap).toFixed(1))
 }
 
 export function initDebug(camera, levelManager, scene, dof) {
@@ -176,6 +179,15 @@ export function initDebug(camera, levelManager, scene, dof) {
   })
   moveFolder.add(settings, 'l2PanClamp', 2, 20, 0.5).name('L2 Pan Clamp').listen().onChange(v => {
     levelManager._setL2PanClamp(v)
+  })
+  moveFolder.add(settings, 'l1PanDamping', 0.8, 0.99, 0.01).name('L1 Pan Damping').listen().onChange(v => {
+    levelManager._setL1PanDamping(v)
+  })
+  moveFolder.add(settings, 'l2PanDamping', 0.8, 0.99, 0.01).name('L2 Pan Damping').listen().onChange(v => {
+    levelManager._setL2PanDamping(v)
+  })
+  moveFolder.add(settings, 'rotDamping', 0.8, 0.99, 0.01).name('L3 Rot Damping').listen().onChange(v => {
+    levelManager._setRotDamping(v)
   })
 
   const dofFolder = camFolder.addFolder('Depth of Field')
@@ -283,7 +295,6 @@ export function initDebug(camera, levelManager, scene, dof) {
   aisleFolder.add(shelfConfig, 'numShelfUnits', 1, 32, 1).name('Shelf Units').listen()
   aisleFolder.add(shelfConfig, 'shelfWidth', 6, 60, 0.5).name('Aisle Length').listen()
   aisleFolder.add(shelfConfig, 'aisleGap', 2.0, 12.0, 0.1).name('Aisle Gap').listen()
-  aisleFolder.add(shelfConfig, 'aisleSpacingZ', 3.0, 16.0, 0.1).name('Aisle Spacing').listen()
   aisleFolder.add(shelfConfig, 'shelfDepth', 0.5, 4.0, 0.1).name('Shelf Depth').listen()
   aisleFolder.add(readouts, 'storeWidth').name('Store Width').listen().disable()
   aisleFolder.add(readouts, 'storeDepth').name('Store Depth').listen().disable()
@@ -318,8 +329,15 @@ export function initDebug(camera, levelManager, scene, dof) {
   axesHelper.visible = settings.showAxes
   scene.add(axesHelper)
 
-  gridHelper = new THREE.GridHelper(28, 28, 0x888888, 0xcccccc)
-  gridHelper.position.set(0, 0.01, 11)
+  const { cellSize } = shelfConfig
+  const gridWorldWidth = levelManagerRef.gridCols * cellSize
+  const gridWorldDepth = levelManagerRef.gridRows * cellSize
+  const gridSize = Math.max(gridWorldWidth, gridWorldDepth)
+  const divisions = gridSize / cellSize
+  const centerX = levelManagerRef.gridOriginX + gridWorldWidth / 2
+  const centerZ = levelManagerRef.gridOriginZ + gridWorldDepth / 2
+  gridHelper = new THREE.GridHelper(gridSize, divisions, 0x888888, 0xcccccc)
+  gridHelper.position.set(centerX, 0.01, centerZ)
   gridHelper.visible = settings.showGrid
   scene.add(gridHelper)
 
@@ -351,6 +369,9 @@ export function syncSettings(levelManager, camera) {
   settings.l1PanSpeed = levelManager.l1PanSpeed
   settings.l2PanSpeed = levelManager.l2PanSpeed
   settings.l2PanClamp = levelManager.l2PanClamp
+  settings.l1PanDamping = levelManager.l1PanDamping
+  settings.l2PanDamping = levelManager.l2PanDamping
+  settings.rotDamping = levelManager.rotDamping
   settings.trolleySpeed = levelManager.trolleySpeed
   settings.trolleyRotation = levelManager.trolleyRotationSpeed
   if (levelManager.gridTileMesh) {

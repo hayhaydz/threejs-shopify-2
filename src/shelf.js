@@ -4,6 +4,7 @@ import { log } from './log.js'
 const MOD = 'Shelf'
 
 export const shelfConfig = {
+  cellSize: 1.0,
   shelfWidth: 18,
   shelfHeight: 3.5,
   shelfDepth: 1.0,
@@ -11,13 +12,16 @@ export const shelfConfig = {
   numTiers: 6,
   productsPerTier: 48,
   depthRows: 6,
-  aisleGap: 3.6,
-  aisleSpacingZ: 5.6,
+  aisleGap: 4.0,
   numShelfUnits: 8,
   productScaleMin: 0.7,
   productScaleRange: 0.7,
   skipHiddenProducts: true,
   showClickZones: false
+}
+
+export function getAisleSpacingZ() {
+  return shelfConfig.shelfDepth * 2 + shelfConfig.aisleGap
 }
 
 const PRODUCT_TYPES = [
@@ -316,12 +320,13 @@ export function findShelfGroupForHit(hitObject) {
   return null
 }
 
-function getPairZ(pairIndex, aisleSpacingZ) {
-  return pairIndex * aisleSpacingZ
+function getPairZ(pairIndex) {
+  return pairIndex * getAisleSpacingZ()
 }
 
 export function createAisleSystem() {
-  const { numShelfUnits, aisleSpacingZ, shelfDepth, aisleGap, skipHiddenProducts, shelfWidth, shelfHeight, showClickZones } = shelfConfig
+  const { numShelfUnits, shelfDepth, aisleGap, skipHiddenProducts, shelfWidth, shelfHeight, showClickZones } = shelfConfig
+  const aisleSpacingZ = getAisleSpacingZ()
   const system = new THREE.Group()
   system.name = 'aisleSystem'
 
@@ -339,7 +344,7 @@ export function createAisleSystem() {
   for (let i = 0; i < numShelfUnits; i++) {
     const isFacingCamera = (i % 2 === 0)
     const pairIndex = Math.floor(i / 2)
-    const pairZ = getPairZ(pairIndex, aisleSpacingZ)
+    const pairZ = getPairZ(pairIndex)
 
     const unit = createShelfUnit()
     unit.userData.shelfUnitIndex = i
@@ -474,13 +479,17 @@ export function rebuildAisleSystem(scene, levelManager) {
 }
 
 export function resizeFloor(scene) {
-  const { shelfWidth, numShelfUnits, aisleSpacingZ, shelfDepth } = shelfConfig
+  const { cellSize, shelfWidth, numShelfUnits, shelfDepth, aisleGap } = shelfConfig
+  const aisleSpacingZ = getAisleSpacingZ()
   const numPairs = Math.ceil(numShelfUnits / 2)
-  const floorWidth = shelfWidth * 1.5
-  const storeZstart = -shelfDepth * 1.5
-  const storeZend = (numPairs - 1) * aisleSpacingZ + shelfDepth / 2
-  const floorDepth = (storeZend - storeZstart) * 1.3
-  const floorCenterZ = (storeZstart + storeZend) / 2
+
+  const gridWidth = shelfWidth + 2 * cellSize
+  const storeEndZ = (numPairs - 1) * aisleSpacingZ + shelfDepth / 2 + aisleGap
+  const gridDepth = storeEndZ + 2 * cellSize
+
+  const floorWidth = gridWidth * 1.2
+  const floorDepth = gridDepth * 1.3
+  const floorCenterZ = (gridDepth / 2) - cellSize
 
   const floor = scene.children.find(c => c.name === 'floor')
   if (floor) {

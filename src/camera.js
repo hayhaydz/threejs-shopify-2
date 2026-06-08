@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 import { log } from './log.js'
-import { shelfConfig } from './shelf.js'
+import { shelfConfig, getAisleSpacingZ } from './shelf.js'
 
 const MOD = 'Camera'
 
@@ -22,7 +22,7 @@ export function computeL1PanBounds() {
   const halfWidth = shelfConfig.shelfWidth / 2
   const storeZstart = -shelfConfig.shelfDepth * 1.5
   const numPairs = Math.ceil(shelfConfig.numShelfUnits / 2)
-  const storeZend = (numPairs - 1) * shelfConfig.aisleSpacingZ + shelfConfig.shelfDepth / 2
+  const storeZend = (numPairs - 1) * getAisleSpacingZ() + shelfConfig.shelfDepth / 2
   return {
     minX: -(halfWidth + 2),
     maxX: halfWidth + 2,
